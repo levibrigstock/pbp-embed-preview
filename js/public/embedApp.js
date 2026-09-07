@@ -85,7 +85,18 @@ async function init() {
 
   await startViewer();
   bindViewerControls();
-  applyConfigToViewer(true);
+  try {
+    applyConfigToViewer(true);
+  } catch (err) {
+    console.warn('[embed] applyConfigToViewer failed', err);
+  }
+  if (scene && !scene.webglOk) {
+    const hint = document.querySelector('.viewer-hint');
+    if (hint) {
+      hint.textContent =
+        '3D preview unavailable on this device — form and quote still work.';
+    }
+  }
   // Mobile browsers often report 0-height canvas on the first paint; force
   // resize on the next 1–2 frames so the lite WebGL view actually fills.
   if (scene?.webglOk) {
@@ -110,6 +121,18 @@ async function init() {
 
 async function startViewer() {
   const canvas = $('viewport');
+  // Phones / iframes often report 0×0 before first layout — give WebGL a real size.
+  try {
+    const parent = canvas?.parentElement;
+    const w = Math.max(parent?.clientWidth || 0, canvas?.clientWidth || 0, 320);
+    const h = Math.max(parent?.clientHeight || 0, canvas?.clientHeight || 0, 240);
+    if (canvas && (canvas.width < 2 || canvas.height < 2)) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+  } catch (_) {
+    /* non-fatal */
+  }
   try {
     const { SceneView } = await import('../render/scene.js?v=20260907a');
     // Reuse the viewer's built-in opening placement/drag. The handlers only ever
@@ -155,14 +178,18 @@ function applyConfigToViewer(immediate = false) {
 
   clearTimeout(rebuildTimer);
   const run = () => {
-    const project = createProject({
-      customer: 'Website visitor',
-      project: `${config.building.width}x${config.building.length}`,
-      buildings: [publicConfigToBuildingPartial(config)],
-    });
-    scene.setProject(project);
-    scene.resize?.();
-    if (immediate) scene.heroShot?.();
+    try {
+      const project = createProject({
+        customer: 'Website visitor',
+        project: `${config.building.width}x${config.building.length}`,
+        buildings: [publicConfigToBuildingPartial(config)],
+      });
+      scene.setProject(project);
+      scene.resize?.();
+      if (immediate) scene.heroShot?.();
+    } catch (err) {
+      console.warn('[embed] viewer update failed', err);
+    }
   };
   if (immediate) run();
   else rebuildTimer = setTimeout(run, 120);

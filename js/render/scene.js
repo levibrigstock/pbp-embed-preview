@@ -21,6 +21,29 @@ import { buildSitePropMesh } from './props.js';
 
 const FT = 1;
 
+/** Prefer r152+ colorSpace; fall back to deprecated encoding for older Three. */
+function setRendererOutputSRGB(renderer) {
+ if (!renderer) return;
+ if ('outputColorSpace' in renderer && THREE.SRGBColorSpace != null) {
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+ } else if ('outputEncoding' in renderer && THREE.sRGBEncoding != null) {
+  renderer.outputEncoding = THREE.sRGBEncoding;
+ }
+}
+
+/** @param {THREE.Texture} tex @param {boolean} [srgb=true] color map vs data/normal/roughness */
+function setTextureColorSpace(tex, srgb = true) {
+ if (!tex) return;
+ if ('colorSpace' in tex && THREE.SRGBColorSpace != null) {
+  tex.colorSpace = srgb
+   ? THREE.SRGBColorSpace
+   : (THREE.NoColorSpace != null ? THREE.NoColorSpace : '');
+ } else if (srgb && 'encoding' in tex && THREE.sRGBEncoding != null) {
+  tex.encoding = THREE.sRGBEncoding;
+ }
+}
+
+
 /** Compact label for opening size badges */
 function formatOpeningLabel(w, h) {
  try {
@@ -189,7 +212,7 @@ export class SceneView {
  }
  this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
  this.renderer.toneMappingExposure = liteLike ? 1.05 : 1.18;
- this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+ setRendererOutputSRGB(this.renderer);
  }
 
  _attachControls(canvas) {
@@ -300,7 +323,7 @@ export class SceneView {
  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
  tex.repeat.set(36, 36);
  tex.anisotropy = 4;
- tex.colorSpace = THREE.SRGBColorSpace;
+ setTextureColorSpace(tex, true);
  this._grassTex = tex;
  return tex;
  }
@@ -322,7 +345,7 @@ export class SceneView {
  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
  tex.repeat.set(6, 6);
  tex.anisotropy = 4;
- tex.colorSpace = THREE.SRGBColorSpace;
+ setTextureColorSpace(tex, true);
  this._gravelTex = tex;
  return tex;
  }
@@ -886,7 +909,7 @@ export class SceneView {
  } catch (_) {
  t.anisotropy = 4;
  }
- t.colorSpace = t === map ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+ setTextureColorSpace(t, t === map);
  t.needsUpdate = true;
  }
 
@@ -1145,6 +1168,7 @@ export class SceneView {
 
  setAutoOrbit(on) {
  this.autoOrbit = !!on;
+ if (!this.webglOk || !this.controls) return;
  this.controls.autoRotate = this.autoOrbit;
  }
 
@@ -1305,6 +1329,7 @@ export class SceneView {
  }
 
  frameAll() {
+ if (!this.webglOk || !this.controls) return;
  const box = new THREE.Box3().setFromObject(this.root);
  if (box.isEmpty()) return;
  const center = box.getCenter(new THREE.Vector3());
@@ -1322,6 +1347,7 @@ export class SceneView {
 
  /** Dramatic sales angle — slightly lower, more cinematic */
  heroShot() {
+ if (!this.webglOk || !this.controls) return;
  const box = new THREE.Box3().setFromObject(this.root);
  if (box.isEmpty()) {
  this.camera.position.set(70, 20, 74);
@@ -2752,7 +2778,7 @@ export class SceneView {
  ctx.textBaseline = 'middle';
  ctx.fillText(text, 192, 48);
  const tex = new THREE.CanvasTexture(canvas);
- tex.colorSpace = THREE.SRGBColorSpace;
+ setTextureColorSpace(tex, true);
  const spr = new THREE.Sprite(
  new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }),
  );
@@ -5190,7 +5216,7 @@ export class SceneView {
  ctx.textBaseline = 'middle';
  ctx.fillText(text, 256, 64);
  const tex = new THREE.CanvasTexture(canvas);
- tex.colorSpace = THREE.SRGBColorSpace;
+ setTextureColorSpace(tex, true);
  const spr = new THREE.Sprite(
  new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }),
  );
@@ -5271,7 +5297,7 @@ export class SceneView {
  face: ud.face || 'main',
  wall: ud.wall,
  };
- this.controls.enabled = false;
+ if (this.controls) this.controls.enabled = false;
  this.canvas.style.cursor = 'grabbing';
  this.canvas.setPointerCapture?.(event.pointerId);
  if (this.handlers.onOpeningClick) this.handlers.onOpeningClick(ud);
@@ -5420,7 +5446,7 @@ export class SceneView {
  if (!this._drag) return;
  const d = this._drag;
  this._drag = null;
- this.controls.enabled = this.mode === 'orbit' || true;
+ if (this.controls) this.controls.enabled = this.mode === 'orbit' || true;
  this.canvas.style.cursor = this.mode === 'move-opening' ? 'grab' : 'default';
  try {
  this.canvas.releasePointerCapture?.(event.pointerId);

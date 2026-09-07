@@ -50,9 +50,9 @@ export const PUBLIC_ROOF_STYLES = ['gable', 'mono'];
 export const PUBLIC_COLORS = {
   // Tuned for phone/embed contrast (true white vs warm Alamo; punchier hues).
   BK: { label: 'Matte Black', hex: '#121212' },
-  AL: { label: 'Alamo White', hex: '#f2ebe0' },
+  AL: { label: 'Alamo White', hex: '#f5e6d3' },
   GAL: { label: 'Galvalume', hex: '#c8d0d8' },
-  WH: { label: 'Bright White', hex: '#fafafa' },
+  WH: { label: 'Bright White', hex: '#ffffff' },
   BR: { label: 'Brown', hex: '#6b3f24' },
   TN: { label: 'Tan', hex: '#d4b896' },
   GR: { label: 'Evergreen', hex: '#1f6b38' },

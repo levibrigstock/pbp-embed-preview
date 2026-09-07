@@ -55,9 +55,9 @@ function formatOpeningLabel(w, h) {
 
 const COLOR_HEX = {
  BK: 0x121212,
- AL: 0xf2ebe0,
+ AL: 0xf5e6d3,
  GAL: 0xc8d0d8,
- WH: 0xfafafa,
+ WH: 0xffffff,
  BR: 0x6b3f24,
  TN: 0xd4b896,
  GR: 0x1f6b38,
@@ -94,8 +94,8 @@ export class SceneView {
  this.webglOk = false;
  this.renderer = null;
  this.scene = new THREE.Scene();
- this.scene.background = new THREE.Color(0x7eb4d8);
- this.scene.fog = new THREE.FogExp2(0xc5dce8, 0.00135);
+ this.scene.background = new THREE.Color(this.lite ? 0xa8c8e0 : 0x7eb4d8);
+ this.scene.fog = new THREE.FogExp2(this.lite ? 0xd8e4ec : 0xc5dce8, this.lite ? 0.0007 : 0.00135);
  this.camera = new THREE.PerspectiveCamera(38, 1, 0.4, 900);
  this.camera.position.set(72, 28, 78);
  this.controls = null;
@@ -731,14 +731,19 @@ export class SceneView {
  }
 
  _lights() {
- const amb = new THREE.AmbientLight(0xd0e0f0, 0.22);
+ // Lite/embed: neutral lights so white panels don't pick up sky blue.
+ const amb = new THREE.AmbientLight(this.lite ? 0xf0f0f0 : 0xd0e0f0, this.lite ? 0.55 : 0.22);
  this.scene.add(amb);
 
- const hemi = new THREE.HemisphereLight(0xe8f2ff, 0x5a7048, 0.62);
+ const hemi = new THREE.HemisphereLight(
+ this.lite ? 0xffffff : 0xe8f2ff,
+ this.lite ? 0xb0b0b0 : 0x5a7048,
+ this.lite ? 0.45 : 0.62,
+ );
  this.scene.add(hemi);
 
  // Key sun
- this.sun = new THREE.DirectionalLight(0xfff2dc, this.lite ? 1.35 : 1.55);
+ this.sun = new THREE.DirectionalLight(this.lite ? 0xffffff : 0xfff2dc, this.lite ? 1.15 : 1.55);
  this.sun.position.set(55, 95, 38);
  if (!this.lite) {
  this.sun.castShadow = true;
@@ -759,17 +764,17 @@ export class SceneView {
  this.scene.add(this.sun.target);
 
  // Cool fill
- const fill = new THREE.DirectionalLight(0xb0ccf0, 0.42);
+ const fill = new THREE.DirectionalLight(this.lite ? 0xe8e8e8 : 0xb0ccf0, this.lite ? 0.25 : 0.42);
  fill.position.set(-45, 35, -55);
  this.scene.add(fill);
 
  // Warm rim / bounce
- const rim = new THREE.DirectionalLight(0xffd8b0, 0.38);
+ const rim = new THREE.DirectionalLight(this.lite ? 0xf0f0f0 : 0xffd8b0, this.lite ? 0.2 : 0.38);
  rim.position.set(-18, 28, 65);
  this.scene.add(rim);
 
  // Soft ground bounce
- const bounce = new THREE.DirectionalLight(0xc8d8a0, 0.18);
+ const bounce = new THREE.DirectionalLight(this.lite ? 0xe0e0e0 : 0xc8d8a0, this.lite ? 0.12 : 0.18);
  bounce.position.set(10, -20, 10);
  this.scene.add(bounce);
  }
@@ -856,7 +861,7 @@ export class SceneView {
 
  // Diffuse — light colors need a high floor or whites read gray on phone
  const lum = 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b;
- const shadeFloor = lum > 0.7 ? 0.94 : lum > 0.4 ? 0.84 : 0.72;
+ const shadeFloor = lum > 0.7 ? 0.98 : lum > 0.4 ? 0.88 : 0.74;
  const shadeAmp = Math.max(0.12, 1 - shadeFloor);
  const shade = shadeFloor + profile * shadeAmp - seam - screw * 0.35;
  const i = (y * W + x) * 4;
@@ -973,16 +978,18 @@ export class SceneView {
  }
  // Physical metal with clearcoat. Lite/embed: less metal wash so colors read on phone.
  const liteMetal = !!this.lite;
+ // Embed/phone: nearly matte painted-metal so customer colors match swatches
+ // (high metalness + ACES was washing white → gray and muddying hues).
  return new THREE.MeshPhysicalMaterial({
  color: 0xffffff,
  map,
  normalMap,
  roughnessMap,
- metalness: opts.metalness ?? (liteMetal ? 0.42 : 0.88),
- roughness: opts.roughness ?? (liteMetal ? 0.48 : 0.28),
- clearcoat: opts.clearcoat ?? (liteMetal ? 0.12 : 0.35),
- clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 0.45 : 0.28),
- envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0.45 : 1.15),
+ metalness: opts.metalness ?? (liteMetal ? 0.06 : 0.88),
+ roughness: opts.roughness ?? (liteMetal ? 0.72 : 0.28),
+ clearcoat: opts.clearcoat ?? (liteMetal ? 0 : 0.35),
+ clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 1 : 0.28),
+ envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0 : 1.15),
  normalScale: new THREE.Vector2(
  opts.normalStrength ?? 1.45,
  opts.normalStrength ?? 1.45,
@@ -1003,11 +1010,11 @@ export class SceneView {
  const liteMetal = !!this.lite;
  return new THREE.MeshPhysicalMaterial({
  color: col,
- metalness: opts.metalness ?? (liteMetal ? 0.35 : 0.62),
- roughness: opts.roughness ?? (liteMetal ? 0.5 : 0.38),
- clearcoat: opts.clearcoat ?? (liteMetal ? 0.1 : 0.35),
- clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 0.45 : 0.3),
- envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0.4 : 0.85),
+ metalness: opts.metalness ?? (liteMetal ? 0.08 : 0.62),
+ roughness: opts.roughness ?? (liteMetal ? 0.7 : 0.38),
+ clearcoat: opts.clearcoat ?? (liteMetal ? 0 : 0.35),
+ clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 1 : 0.3),
+ envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0 : 0.85),
  flatShading: false,
  transparent: opts.transparent ?? false,
  opacity: opts.opacity ?? 1,
@@ -1047,15 +1054,17 @@ export class SceneView {
  /** Physical rib extrusion so ag panel reads in silhouette (not just texture). */
  _addAgRibs(group, wdef, hex, majorEveryFt = 3, minorEveryFt = 0.75, openings = []) {
  if (!this.showMetal) return;
+ const ribMetal = this.lite ? 0.08 : 0.85;
+ const ribRough = this.lite ? 0.7 : 0.28;
  const majorMat = new THREE.MeshStandardMaterial({
  color: new THREE.Color(hex).offsetHSL(0, 0, 0.06),
- metalness: 0.85,
- roughness: 0.28,
+ metalness: ribMetal,
+ roughness: ribRough,
  });
  const minorMat = new THREE.MeshStandardMaterial({
  color: new THREE.Color(hex).offsetHSL(0, 0, 0.02),
- metalness: 0.8,
- roughness: 0.32,
+ metalness: this.lite ? 0.06 : 0.8,
+ roughness: this.lite ? 0.72 : 0.32,
  });
 
  const isFrontBack = wdef.wall === 'front' || wdef.wall === 'back';
@@ -2377,15 +2386,17 @@ export class SceneView {
    */
  _addGableEndRibs(group, wall, W, H, rise, z, hex, yMin, openings = []) {
  if (!this.showMetal) return;
+ const ribMetal = this.lite ? 0.08 : 0.85;
+ const ribRough = this.lite ? 0.7 : 0.28;
  const majorMat = new THREE.MeshStandardMaterial({
  color: new THREE.Color(hex).offsetHSL(0, 0, 0.06),
- metalness: 0.85,
- roughness: 0.28,
+ metalness: ribMetal,
+ roughness: ribRough,
  });
  const minorMat = new THREE.MeshStandardMaterial({
  color: new THREE.Color(hex).offsetHSL(0, 0, 0.02),
- metalness: 0.8,
- roughness: 0.32,
+ metalness: this.lite ? 0.06 : 0.8,
+ roughness: this.lite ? 0.72 : 0.32,
  });
  const isFront = wall === 'front';
  // Match _addAgRibs front/back placement exactly
@@ -3905,15 +3916,17 @@ export class SceneView {
  yMinFt = 0,
  yMaxFt = null,
  ) {
+ const ribMetal = this.lite ? 0.08 : 0.85;
+ const ribRough = this.lite ? 0.7 : 0.28;
  const majorMat = new THREE.MeshStandardMaterial({
  color: new THREE.Color(hex).offsetHSL(0, 0, 0.06),
- metalness: 0.85,
- roughness: 0.28,
+ metalness: ribMetal,
+ roughness: ribRough,
  });
  const minorMat = new THREE.MeshStandardMaterial({
  color: new THREE.Color(hex).offsetHSL(0, 0, 0.02),
- metalness: 0.8,
- roughness: 0.32,
+ metalness: this.lite ? 0.06 : 0.8,
+ roughness: this.lite ? 0.72 : 0.32,
  });
  const majorEvery = 3;
  const minorEvery = 0.75;

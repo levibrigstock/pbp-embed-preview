@@ -148,7 +148,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260907f');
+    const { SceneView } = await import('../render/scene.js?v=20260907g');
     // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,

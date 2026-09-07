@@ -184,14 +184,15 @@ export class SceneView {
  }
  : profile === 'lite'
  ? {
+ // Sharp on modern phones (iPhone etc.); still no shadows/env map.
  canvas,
- antialias: false,
+ antialias: true,
  alpha: false,
  preserveDrawingBuffer: false,
  powerPreference: 'default',
  }
  : {
- // Even safer retry for phones that still OOM/crash on first lite init
+ // Even safer retry if sharp lite OOMs/crashes
  canvas,
  antialias: false,
  alpha: false,
@@ -204,14 +205,15 @@ export class SceneView {
  if (!gl) throw new Error('No WebGL context');
  this.webglOk = true;
  const dpr = window.devicePixelRatio || 1;
- const prCap = profile === 'full' ? 2 : profile === 'lite' ? 1.25 : 1;
+ // lite used to cap at 1.25 → blurry on 2–3× phones; match full sharpness, safer stays 1
+ const prCap = profile === 'full' ? 2 : profile === 'lite' ? 2 : 1;
  this.renderer.setPixelRatio(Math.min(dpr, prCap));
  this.renderer.shadowMap.enabled = !liteLike;
  if (!liteLike) {
  this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
  }
  this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
- this.renderer.toneMappingExposure = liteLike ? 1.05 : 1.18;
+ this.renderer.toneMappingExposure = profile === 'safer' ? 1.05 : profile === 'lite' ? 1.12 : 1.18;
  setRendererOutputSRGB(this.renderer);
  }
 

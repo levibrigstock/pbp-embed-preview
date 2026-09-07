@@ -62,6 +62,10 @@ let rebuildTimer = 0;
 let placeDraft = null;
 let dragListTimer = 0;
 
+/** Filled lazily by resolveLeadWebhook / resolveCompanyBranding (must be above init()). */
+let leadWebhookLookup;
+let companyBrandingLookup;
+
 init().catch((err) => {
   console.error('[embed] failed to start', err);
   const hint = document.querySelector('.viewer-hint');
@@ -144,7 +148,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260907d');
+    const { SceneView } = await import('../render/scene.js?v=20260907e');
     // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,
@@ -865,7 +869,6 @@ function isHttpsUrl(value) {
   }
 }
 
-let leadWebhookLookup;
 /**
  * Resolve the lead webhook URL, first source wins:
  *   1. `?leadWebhook=` query param  (must be an absolute https URL)
@@ -906,7 +909,6 @@ const DEFAULT_BRANDING = {
   accent: null,
 };
 
-let companyBrandingLookup;
 
 /**
  * Resolve per-company embed chrome from `public/company-config.json`:

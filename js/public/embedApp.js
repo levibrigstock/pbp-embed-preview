@@ -1003,6 +1003,7 @@ function syncFormFromConfig() {
   setVal('roofColor', config.colors.roof);
   setVal('trimColor', config.colors.trim);
   setVal('wainscotColor', config.colors.wainscot);
+  for (const id of ['wallColor', 'roofColor', 'trimColor', 'wainscotColor']) syncColorUi(id);
   setVal('wainscotHeight', config.colors.wainscotHeightFt);
   syncWainscotHeightVisibility();
 
@@ -1054,9 +1055,72 @@ function populateColorSelects() {
   ).join('');
   for (const id of ['wallColor', 'roofColor', 'trimColor']) {
     $(id).innerHTML = colorOpts;
+    enhanceColorField(id, false);
   }
   $('wainscotColor').innerHTML =
     `<option value="NONE">None</option>` + colorOpts;
+  enhanceColorField('wainscotColor', true);
+}
+
+/** Swatch + chip strip so phone users see real colors, not just names. */
+function enhanceColorField(selectId, allowNone) {
+  const sel = $(selectId);
+  if (!sel || sel.dataset.colorUi === '1') return;
+  sel.dataset.colorUi = '1';
+  const wrap = document.createElement('div');
+  wrap.className = 'color-field';
+  const sw = document.createElement('span');
+  sw.className = 'swatch';
+  sw.setAttribute('aria-hidden', 'true');
+  sel.parentNode.insertBefore(wrap, sel);
+  wrap.appendChild(sw);
+  wrap.appendChild(sel);
+
+  const chips = document.createElement('div');
+  chips.className = 'color-chips';
+  chips.setAttribute('role', 'listbox');
+  chips.setAttribute('aria-label', sel.previousElementSibling?.textContent || 'Color');
+  const codes = allowNone ? ['NONE', ...PUBLIC_COLOR_CODES] : PUBLIC_COLOR_CODES;
+  for (const code of codes) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('role', 'option');
+    btn.dataset.code = code;
+    btn.title = code === 'NONE' ? 'None' : PUBLIC_COLORS[code].label;
+    btn.setAttribute('aria-label', btn.title);
+    btn.style.background = code === 'NONE'
+      ? 'repeating-linear-gradient(45deg,#ccc 0 4px,#eee 4px 8px)'
+      : PUBLIC_COLORS[code].hex;
+    btn.addEventListener('click', () => {
+      sel.value = code;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      syncColorUi(selectId);
+    });
+    chips.appendChild(btn);
+  }
+  wrap.parentNode.insertBefore(chips, wrap.nextSibling);
+
+  sel.addEventListener('change', () => syncColorUi(selectId));
+  syncColorUi(selectId);
+}
+
+function syncColorUi(selectId) {
+  const sel = $(selectId);
+  if (!sel) return;
+  const code = sel.value;
+  const wrap = sel.closest('.color-field');
+  const sw = wrap?.querySelector('.swatch');
+  if (sw) {
+    sw.style.background = code === 'NONE'
+      ? 'repeating-linear-gradient(45deg,#ccc 0 4px,#eee 4px 8px)'
+      : (PUBLIC_COLORS[code]?.hex || '#ccc');
+  }
+  const chips = wrap?.parentNode?.querySelector('.color-chips');
+  if (chips) {
+    chips.querySelectorAll('button').forEach((btn) => {
+      btn.setAttribute('aria-pressed', btn.dataset.code === code ? 'true' : 'false');
+    });
+  }
 }
 
 function wallSelect(current, selKey) {

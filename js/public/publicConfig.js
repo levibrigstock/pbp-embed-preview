@@ -48,18 +48,19 @@ export const PUBLIC_ROOF_STYLES = ['gable', 'mono'];
  * UI shows the label + a swatch; only the code travels in the payload.
  */
 export const PUBLIC_COLORS = {
-  BK: { label: 'Matte Black', hex: '#1a1a1a' },
-  AL: { label: 'Alamo White', hex: '#e8e4dc' },
-  GAL: { label: 'Galvalume', hex: '#b8c0c8' },
-  WH: { label: 'Bright White', hex: '#f5f5f0' },
-  BR: { label: 'Brown', hex: '#5c4030' },
-  TN: { label: 'Tan', hex: '#c4a882' },
-  GR: { label: 'Evergreen', hex: '#2d5a3d' },
-  RD: { label: 'Crimson Red', hex: '#8b1e1e' },
-  BU: { label: 'Burgundy', hex: '#5c1a2e' },
-  SL: { label: 'Charcoal / Slate', hex: '#3a3d42' },
-  LB: { label: 'Light Blue', hex: '#6a8fad' },
-  CG: { label: 'Clay / Claystone', hex: '#9a7b5a' },
+  // Tuned for phone/embed contrast (true white vs warm Alamo; punchier hues).
+  BK: { label: 'Matte Black', hex: '#121212' },
+  AL: { label: 'Alamo White', hex: '#f2ebe0' },
+  GAL: { label: 'Galvalume', hex: '#c8d0d8' },
+  WH: { label: 'Bright White', hex: '#fafafa' },
+  BR: { label: 'Brown', hex: '#6b3f24' },
+  TN: { label: 'Tan', hex: '#d4b896' },
+  GR: { label: 'Evergreen', hex: '#1f6b38' },
+  RD: { label: 'Crimson Red', hex: '#b01e1e' },
+  BU: { label: 'Burgundy', hex: '#7a1838' },
+  SL: { label: 'Charcoal / Slate', hex: '#4a5160' },
+  LB: { label: 'Light Blue', hex: '#4f8fc4' },
+  CG: { label: 'Clay / Claystone', hex: '#b08455' },
 };
 
 export const PUBLIC_COLOR_CODES = Object.keys(PUBLIC_COLORS);

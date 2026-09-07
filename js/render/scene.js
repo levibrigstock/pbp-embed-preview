@@ -54,18 +54,18 @@ function formatOpeningLabel(w, h) {
 }
 
 const COLOR_HEX = {
- BK: 0x1a1a1a,
- AL: 0xe8e4dc,
- GAL: 0xb8c0c8,
- WH: 0xf5f5f0,
- BR: 0x5c4030,
- TN: 0xc4a882,
- GR: 0x2d5a3d,
- RD: 0x8b1e1e,
- BU: 0x5c1a2e,
- SL: 0x3a3d42,
- LB: 0x6a8fad,
- CG: 0x9a7b5a,
+ BK: 0x121212,
+ AL: 0xf2ebe0,
+ GAL: 0xc8d0d8,
+ WH: 0xfafafa,
+ BR: 0x6b3f24,
+ TN: 0xd4b896,
+ GR: 0x1f6b38,
+ RD: 0xb01e1e,
+ BU: 0x7a1838,
+ SL: 0x4a5160,
+ LB: 0x4f8fc4,
+ CG: 0xb08455,
 };
 
 export class SceneView {
@@ -213,7 +213,7 @@ export class SceneView {
  this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
  }
  this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
- this.renderer.toneMappingExposure = profile === 'safer' ? 1.05 : profile === 'lite' ? 1.12 : 1.18;
+ this.renderer.toneMappingExposure = profile === 'safer' ? 1.08 : profile === 'lite' ? 1.22 : 1.18;
  setRendererOutputSRGB(this.renderer);
  }
 
@@ -854,8 +854,11 @@ export class SceneView {
  );
  const screw = screwRow < 0.03 && screwCol < 0.025 ? 0.25 : 0;
 
- // Diffuse
- const shade = 0.78 + profile * 0.28 - seam - screw * 0.4;
+ // Diffuse — light colors need a high floor or whites read gray on phone
+ const lum = 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b;
+ const shadeFloor = lum > 0.7 ? 0.94 : lum > 0.4 ? 0.84 : 0.72;
+ const shadeAmp = Math.max(0.12, 1 - shadeFloor);
+ const shade = shadeFloor + profile * shadeAmp - seam - screw * 0.35;
  const i = (y * W + x) * 4;
  img.data[i] = Math.min(255, Math.max(0, base.r * 255 * shade));
  img.data[i + 1] = Math.min(255, Math.max(0, base.g * 255 * shade));
@@ -968,17 +971,18 @@ export class SceneView {
  }
  t.needsUpdate = true;
  }
- // Physical metal with clearcoat for showroom sheen
+ // Physical metal with clearcoat. Lite/embed: less metal wash so colors read on phone.
+ const liteMetal = !!this.lite;
  return new THREE.MeshPhysicalMaterial({
  color: 0xffffff,
  map,
  normalMap,
  roughnessMap,
- metalness: opts.metalness ?? 0.88,
- roughness: opts.roughness ?? 0.28,
- clearcoat: opts.clearcoat ?? 0.35,
- clearcoatRoughness: opts.clearcoatRoughness ?? 0.28,
- envMapIntensity: opts.envMapIntensity ?? 1.15,
+ metalness: opts.metalness ?? (liteMetal ? 0.42 : 0.88),
+ roughness: opts.roughness ?? (liteMetal ? 0.48 : 0.28),
+ clearcoat: opts.clearcoat ?? (liteMetal ? 0.12 : 0.35),
+ clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 0.45 : 0.28),
+ envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0.45 : 1.15),
  normalScale: new THREE.Vector2(
  opts.normalStrength ?? 1.45,
  opts.normalStrength ?? 1.45,
@@ -994,15 +998,16 @@ export class SceneView {
  }
 
  _metalMat(hex, opts = {}) {
- // Trim / ridge / solid metal accents — keep metalness moderate so dropdown colors read clearly
+ // Trim / ridge / solid metal accents — lite/embed keeps colors readable on phone
  const col = new THREE.Color(this._colorFor(hex, 0xcccccc));
+ const liteMetal = !!this.lite;
  return new THREE.MeshPhysicalMaterial({
  color: col,
- metalness: opts.metalness ?? 0.62,
- roughness: opts.roughness ?? 0.38,
- clearcoat: opts.clearcoat ?? 0.35,
- clearcoatRoughness: opts.clearcoatRoughness ?? 0.3,
- envMapIntensity: opts.envMapIntensity ?? 0.85,
+ metalness: opts.metalness ?? (liteMetal ? 0.35 : 0.62),
+ roughness: opts.roughness ?? (liteMetal ? 0.5 : 0.38),
+ clearcoat: opts.clearcoat ?? (liteMetal ? 0.1 : 0.35),
+ clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 0.45 : 0.3),
+ envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0.4 : 0.85),
  flatShading: false,
  transparent: opts.transparent ?? false,
  opacity: opts.opacity ?? 1,
@@ -1467,7 +1472,7 @@ export class SceneView {
  const frameOh = ((b.overhangIn || 0) / 12) * FT;
  const oh = metalOh + frameOh;
 
- const wallHex = this._colorFor(b.wallColor, 0xe8e4dc);
+ const wallHex = this._colorFor(b.wallColor, 0xf2ebe0);
  const roofHex = this._colorFor(b.roofColor, 0x1a1a1a);
 
  // No solid under-building disc (green lawn / AO circle blocked underside truss views)
@@ -2940,7 +2945,7 @@ export class SceneView {
  const wallThick = 0.16;
  const cornerInset = wallThick; // miter: outer wall stops where end wall thickness starts
  const trimHex = this._colorFor(b.trimColor || b.roofColor || 'BK', 0x2a2a2a);
- const wallHex = this._colorFor(b.wallColor, 0xe8e4dc);
+ const wallHex = this._colorFor(b.wallColor, 0xf2ebe0);
  const roofHex = this._colorFor(b.roofColor, 0x1a1a1a);
 
  if (enclosed) {

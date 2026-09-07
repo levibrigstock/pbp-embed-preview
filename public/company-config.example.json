@@ -2,12 +2,23 @@
   "__comment": "Copy to public/company-config.json (gitignored) for per-company embed chrome. Keyed by ?companyId=; default used when no match. Fields: displayName, logoUrl? (https image), accent? (CSS color). Branding only — no secrets.",
   "demo": {
     "displayName": "Demo Barns",
+    "logoUrl": "https://www.example.com/demo-barns-logo.png",
     "accent": "#7c4dff"
+  },
+  "webuild-structures": {
+    "displayName": "We Build Structures",
+    "logoUrl": "https://www.example.com/webuild-structures-logo.png",
+    "accent": "#1b4f72"
   },
   "acmebarns": {
     "displayName": "Acme Barns",
     "logoUrl": "https://www.example.com/acme-logo.png",
     "accent": "#c45c26"
+  },
+  "barn-bros": {
+    "displayName": "Barn Bros",
+    "logoUrl": "https://www.example.com/barn-bros-logo.png",
+    "accent": "#2e7d32"
   },
   "default": {
     "displayName": "Design Your Building"

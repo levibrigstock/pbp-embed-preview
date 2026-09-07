@@ -12,7 +12,9 @@
  *   - Colors (wall, roof, trim, wainscot)
  *   - Lean-tos (wall, depth, length, offset, enclosed, pitch, eave height)
  *   - Metal gauge (26 / 29)
- *   - Openings (windows, walk doors, overhead/garage doors)
+ *   - Openings (windows, walk doors, overhead/garage doors) on a main wall
+ *     (`host: 'main'`) or on an enclosed lean-to wall (`host: <leanTo id>` +
+ *     `face: outer | leftEnd | rightEnd`)
  *   - Concrete slab (yes/no + thickness in inches)
  *   - companyId (multi-tenant embed routing — a plain public identifier)
  *
@@ -74,6 +76,20 @@ export const PUBLIC_OPENING_TYPES = {
 };
 
 export const PUBLIC_OPENING_TYPE_KEYS = Object.keys(PUBLIC_OPENING_TYPES);
+
+/**
+ * Lean-to wall faces a customer can place an opening on. Matches the internal
+ * `opening.face` values (js/domain/types.js) exactly — the viewer already emits
+ * these from taps on an enclosed lean-to. Main-wall openings use `host: 'main'`
+ * and carry no `face`.
+ */
+export const PUBLIC_OPENING_FACES = ['outer', 'leftEnd', 'rightEnd'];
+
+export const PUBLIC_OPENING_FACE_LABELS = {
+  outer: 'Outer wall',
+  leftEnd: 'Left end wall',
+  rightEnd: 'Right end wall',
+};
 
 /* ───────────────────────────── Numeric limits ──────────────────────────────
  * Bounds are for sanity + keeping the viewer stable, not engineering approval.
@@ -157,9 +173,17 @@ export function defaultPublicLeanTo(partial = {}) {
 export function defaultPublicOpening(partial = {}) {
   const type = pickEnum(partial.type, PUBLIC_OPENING_TYPE_KEYS, 'window');
   const def = PUBLIC_OPENING_TYPES[type];
-  return {
+  const host = sanitizeOpeningHost(partial.host);
+  const op = {
     id: partial.id || uid('op'),
     type,
+    /**
+     * Host surface: 'main' = one of the four main walls (use `wall`); any other
+     * value is a lean-to id (see leanTos[].id) and the opening also carries a
+     * `face`. Whichever it is, `wall` still records the main wall the surface
+     * belongs to so the form/list can label it.
+     */
+    host,
     wall: pickEnum(partial.wall, PUBLIC_WALLS, 'front'),
     width: clampNum(partial.width, PUBLIC_LIMITS.opening.width, def.defaultW),
     height: clampNum(partial.height, PUBLIC_LIMITS.opening.height, def.defaultH),
@@ -167,6 +191,11 @@ export function defaultPublicOpening(partial = {}) {
     offset: clampNum(partial.offset, PUBLIC_LIMITS.opening.offset, 0),
     sillHeight: clampNum(partial.sillHeight, PUBLIC_LIMITS.opening.sillHeight, def.defaultSill),
   };
+  // `face` is only meaningful for a lean-to host.
+  if (host !== 'main') {
+    op.face = pickEnum(partial.face, PUBLIC_OPENING_FACES, 'outer');
+  }
+  return op;
 }
 
 /* ────────────────────────────── Validation ─────────────────────────────── */
@@ -224,11 +253,28 @@ export function validatePublicConfig(input) {
   out.leanTos = leans.slice(0, PUBLIC_LIMITS.leanTo.maxCount).map((lt) => defaultPublicLeanTo(isObject(lt) ? lt : {}));
 
   // ── openings ──
+  // Validated AFTER lean-tos so a lean-to host can be checked for existence +
+  // enclosure and the face clamped to a real value.
+  const leanById = new Map(out.leanTos.map((lt) => [lt.id, lt]));
   const ops = Array.isArray(src.openings) ? src.openings : [];
   if (ops.length > PUBLIC_LIMITS.opening.maxCount) {
     warnings.push(`Too many openings (${ops.length}); kept first ${PUBLIC_LIMITS.opening.maxCount}.`);
   }
-  out.openings = ops.slice(0, PUBLIC_LIMITS.opening.maxCount).map((op) => defaultPublicOpening(isObject(op) ? op : {}));
+  out.openings = ops.slice(0, PUBLIC_LIMITS.opening.maxCount).map((op) => {
+    const shaped = defaultPublicOpening(isObject(op) ? op : {});
+    if (shaped.host !== 'main') {
+      const lean = leanById.get(shaped.host);
+      if (!lean) {
+        warnings.push(`opening ${shaped.id}: lean-to "${shaped.host}" not found; moved to the ${shaped.wall} wall.`);
+        return demoteOpeningToMain(shaped);
+      }
+      if (lean.enclosed === false) {
+        warnings.push(`opening ${shaped.id}: that lean-to is open (no walls); moved to the ${shaped.wall} wall.`);
+        return demoteOpeningToMain(shaped);
+      }
+    }
+    return shaped;
+  });
 
   // ── concrete ──
   const con = isObject(src.concrete) ? src.concrete : {};
@@ -282,17 +328,26 @@ export function stripSecretsFromConfig(anyConfig) {
           eaveHeight: lt.eaveHeight,
         })),
         openings: (src.openings || [])
-          // only main-wall openings are exposed publicly
-          .filter((op) => !op.host || op.host === 'main')
-          .map((op) => ({
-            id: op.id,
-            type: op.type,
-            wall: op.wall,
-            width: op.width,
-            height: op.height,
-            offset: op.offset,
-            sillHeight: op.sillHeight,
-          })),
+          // main-wall openings, plus openings on an enclosed lean-to that exists
+          .filter((op) => {
+            if (!op.host || op.host === 'main') return true;
+            const lean = (src.leanTos || []).find((lt) => lt.id === op.host);
+            return !!lean && lean.enclosed !== false;
+          })
+          .map((op) => {
+            const base = {
+              id: op.id,
+              type: op.type,
+              wall: op.wall,
+              width: op.width,
+              height: op.height,
+              offset: op.offset,
+              sillHeight: op.sillHeight,
+              host: op.host && op.host !== 'main' ? op.host : 'main',
+            };
+            if (base.host !== 'main') base.face = op.face || 'outer';
+            return base;
+          }),
         concrete: {
           enabled: src.hasSlab === true,
           thicknessIn: src.slabThicknessIn,
@@ -340,6 +395,9 @@ export function publicConfigToBuildingPartial(publicConfig) {
     slabThicknessIn: cfg.concrete.thicknessIn,
 
     leanTos: cfg.leanTos.map((lt) => ({
+      // Keep the public id so an opening's `host` maps to the same lean-to once
+      // createBuilding() runs (createLeanTo honours a provided id).
+      id: lt.id,
       wall: lt.wall,
       depth: lt.depth,
       length: lt.length,
@@ -349,19 +407,25 @@ export function publicConfigToBuildingPartial(publicConfig) {
       ...(lt.eaveHeight != null ? { eaveHeight: lt.eaveHeight } : {}),
     })),
 
-    openings: cfg.openings.map((op) => ({
+    openings: cfg.openings.map((op) => {
       // Keep the public id so the viewer's drag/select events map back to the
       // exact entry in publicConfig.openings (the id is already part of the
       // public contract and the lead payload).
-      id: op.id,
-      type: op.type,
-      wall: op.wall,
-      width: op.width,
-      height: op.height,
-      offset: op.offset,
-      sillHeight: op.sillHeight,
-      host: 'main',
-    })),
+      const mapped = {
+        id: op.id,
+        type: op.type,
+        wall: op.wall,
+        width: op.width,
+        height: op.height,
+        offset: op.offset,
+        sillHeight: op.sillHeight,
+        host: op.host || 'main',
+      };
+      // Lean-to openings carry a face; validatePublicConfig has already checked
+      // the host lean-to exists and is enclosed.
+      if (mapped.host !== 'main') mapped.face = op.face || 'outer';
+      return mapped;
+    }),
   };
 }
 
@@ -371,6 +435,22 @@ export function sanitizeCompanyId(id) {
   const s = String(id == null ? '' : id).trim().toLowerCase();
   const cleaned = s.replace(/[^a-z0-9_-]/g, '').slice(0, 64);
   return cleaned || 'demo';
+}
+
+/**
+ * A public opening host is either 'main' or a lean-to id (same id space as
+ * leanTos[].id — see `uid('lt')`). Anything unusable falls back to 'main'.
+ */
+function sanitizeOpeningHost(host) {
+  if (host == null || host === '' || host === 'main') return 'main';
+  const cleaned = String(host).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+  return cleaned || 'main';
+}
+
+/** Move a lean-to opening back onto its main wall (drops the `face`). */
+function demoteOpeningToMain(op) {
+  const { face, ...rest } = op;
+  return { ...rest, host: 'main' };
 }
 
 function normalizeGauge(g) {

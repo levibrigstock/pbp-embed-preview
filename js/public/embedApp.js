@@ -29,6 +29,8 @@ import {
   PUBLIC_WALL_LABELS,
   PUBLIC_OPENING_TYPES,
   PUBLIC_OPENING_TYPE_KEYS,
+  PUBLIC_OPENING_FACES,
+  PUBLIC_OPENING_FACE_LABELS,
   PUBLIC_LIMITS,
   PUBLIC_SCHEMA_VERSION,
 } from './publicConfig.js';
@@ -254,6 +256,8 @@ function renderLeanList() {
       config.leanTos.splice(i, 1);
       commit();
       renderLeanList();
+      // A removed lean-to may have hosted openings — validate demoted them.
+      renderOpeningList();
     });
 
     item.querySelectorAll('[data-k]').forEach((input) => {
@@ -264,6 +268,8 @@ function renderLeanList() {
         else lt[k] = Number(input.value);
         config.leanTos[i] = defaultPublicLeanTo(lt);
         commit();
+        // Enclosure/wall changes affect where openings can live.
+        renderOpeningList();
       });
     });
 
@@ -271,6 +277,7 @@ function renderLeanList() {
       lt.wall = e.target.value;
       config.leanTos[i] = defaultPublicLeanTo(lt);
       commit();
+      renderOpeningList();
     });
 
     host.appendChild(item);
@@ -408,14 +415,24 @@ function showBanner(text, keepOpen) {
 
 /** A wall was tapped in place-opening mode. */
 function placeOpeningFromViewer(data) {
-  // The public embed only exposes main-building walls.
-  if (data.host && data.host !== 'main') {
-    showBanner('Openings can only go on the four main walls here.', false);
-    return;
+  // Main walls: always OK. Lean-to walls: only when the lean-to is enclosed.
+  const host = data.host && data.host !== 'main' ? data.host : 'main';
+  if (host !== 'main') {
+    const lean = config.leanTos.find((lt) => lt.id === host);
+    if (!lean) {
+      showBanner('That lean-to isn’t ready yet — try again in a moment.', false);
+      return;
+    }
+    if (lean.enclosed === false) {
+      showBanner('Open lean-tos have no walls. Tick “Enclosed” on the lean-to to add doors or windows.', false);
+      return;
+    }
   }
   const draft = placeDraft || {};
   const op = defaultPublicOpening({
     type: PUBLIC_OPENING_TYPES[data.type] ? data.type : draft.type || 'window',
+    host,
+    face: host !== 'main' ? data.face || 'outer' : undefined,
     wall: data.wall,
     width: data.width ?? draft.width,
     height: data.height ?? draft.height,
@@ -473,7 +490,8 @@ function renderOpeningList() {
     ).join('');
     item.innerHTML = `
       <div class="list-head">
-        <strong>${PUBLIC_OPENING_TYPES[op.type]?.label || 'Opening'} ${i + 1}</strong>
+        <strong>${PUBLIC_OPENING_TYPES[op.type]?.label || 'Opening'} ${i + 1}
+          <span class="loc-note">· ${openingLocationLabel(op)}</span></strong>
         <button type="button" class="link" data-remove>Remove</button>
       </div>
       <div class="row">
@@ -482,8 +500,8 @@ function renderOpeningList() {
           <select data-sel="type">${typeOpts}</select>
         </div>
         <div class="field">
-          <label>Wall</label>
-          ${wallSelect(op.wall, 'wall')}
+          <label>Wall / face</label>
+          ${openingLocationSelect(op)}
         </div>
         <div class="field">
           <label>Width (ft)</label>
@@ -511,10 +529,12 @@ function renderOpeningList() {
     });
 
     item.querySelector('[data-sel="type"]').addEventListener('change', (e) => {
-      // Re-seed size defaults for the new type, keep id/wall/offset.
+      // Re-seed size defaults for the new type, keep id / location / offset.
       config.openings[i] = defaultPublicOpening({
         id: op.id,
         type: e.target.value,
+        host: op.host,
+        face: op.face,
         wall: op.wall,
         offset: op.offset,
       });
@@ -522,10 +542,26 @@ function renderOpeningList() {
       renderOpeningList();
     });
 
-    item.querySelector('[data-sel="wall"]').addEventListener('change', (e) => {
-      op.wall = e.target.value;
-      config.openings[i] = defaultPublicOpening(op);
+    item.querySelector('[data-sel="location"]').addEventListener('change', (e) => {
+      // Value is "<host>:<seg>" — host 'main' → seg is a main wall; otherwise
+      // host is a lean-to id and seg is the lean-to face.
+      const raw = e.target.value;
+      const sep = raw.indexOf(':');
+      const nextHost = raw.slice(0, sep);
+      const seg = raw.slice(sep + 1);
+      if (nextHost === 'main') {
+        config.openings[i] = defaultPublicOpening({ ...op, host: 'main', wall: seg, face: undefined });
+      } else {
+        const lean = config.leanTos.find((lt) => lt.id === nextHost);
+        config.openings[i] = defaultPublicOpening({
+          ...op,
+          host: nextHost,
+          face: seg,
+          wall: lean ? lean.wall : op.wall,
+        });
+      }
       commit();
+      renderOpeningList();
     });
 
     item.querySelectorAll('[data-k]').forEach((input) => {
@@ -698,6 +734,39 @@ function wallSelect(current, selKey) {
     (w) => `<option value="${w}" ${w === current ? 'selected' : ''}>${PUBLIC_WALL_LABELS[w]}</option>`,
   ).join('');
   return `<select data-sel="${selKey}">${opts}</select>`;
+}
+
+/** Short "where is this opening" label for an opening list row. */
+function openingLocationLabel(op) {
+  if (!op.host || op.host === 'main') return PUBLIC_WALL_LABELS[op.wall] || op.wall;
+  const idx = config.leanTos.findIndex((lt) => lt.id === op.host);
+  const face = PUBLIC_OPENING_FACE_LABELS[op.face || 'outer'] || op.face;
+  return idx < 0 ? `Lean-to · ${face}` : `Lean-to ${idx + 1} · ${face}`;
+}
+
+/**
+ * Location picker for an opening: the four main walls, plus a group per enclosed
+ * lean-to (outer / left end / right end). Option values are "<host>:<seg>".
+ */
+function openingLocationSelect(op) {
+  const groups = [];
+  const mainOpts = PUBLIC_WALLS.map((w) => {
+    const sel = (!op.host || op.host === 'main') && op.wall === w ? 'selected' : '';
+    return `<option value="main:${w}" ${sel}>${PUBLIC_WALL_LABELS[w]}</option>`;
+  }).join('');
+  groups.push(`<optgroup label="Main building">${mainOpts}</optgroup>`);
+
+  config.leanTos.forEach((lt, idx) => {
+    if (lt.enclosed === false) return; // open lean-tos have no walls to host openings
+    const faceOpts = PUBLIC_OPENING_FACES.map((f) => {
+      const sel = op.host === lt.id && (op.face || 'outer') === f ? 'selected' : '';
+      return `<option value="${lt.id}:${f}" ${sel}>${PUBLIC_OPENING_FACE_LABELS[f]}</option>`;
+    }).join('');
+    const wallLabel = PUBLIC_WALL_LABELS[lt.wall] || lt.wall;
+    groups.push(`<optgroup label="Lean-to ${idx + 1} (${wallLabel})">${faceOpts}</optgroup>`);
+  });
+
+  return `<select data-sel="location">${groups.join('')}</select>`;
 }
 
 function bindNumber(id, apply) {

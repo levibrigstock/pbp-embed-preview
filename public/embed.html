@@ -346,6 +346,30 @@
       font-size: 13px;
       margin-top: 10px;
     }
+    .quote-handoff {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .quote-handoff .copy-hint {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .quote-handoff .copied-ok {
+      margin: 0;
+      color: #8fe3a6;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .quote-handoff #quoteCopyJson {
+      width: 100%;
+    }
+    .quote-handoff .dialog-actions {
+      margin-top: 0;
+    }
 
     .foot {
       color: var(--muted);
@@ -493,26 +517,36 @@
     <form method="dialog" class="dialog-body" id="quoteForm">
       <h3>Request a quote</h3>
       <p class="sub">We'll send you pricing for the building you designed. No obligation.</p>
-      <div class="row one">
-        <div class="field">
-          <label for="leadName">Name</label>
-          <input type="text" id="leadName" required />
-        </div>
-        <div class="field">
-          <label for="leadPhone">Phone</label>
-          <input type="tel" id="leadPhone" required />
-        </div>
-        <div class="field">
-          <label for="leadEmail">Email</label>
-          <input type="email" id="leadEmail" required />
+      <div id="quoteFormFields">
+        <div class="row one">
+          <div class="field">
+            <label for="leadName">Name</label>
+            <input type="text" id="leadName" required />
+          </div>
+          <div class="field">
+            <label for="leadPhone">Phone</label>
+            <input type="tel" id="leadPhone" required />
+          </div>
+          <div class="field">
+            <label for="leadEmail">Email</label>
+            <input type="email" id="leadEmail" required />
+          </div>
         </div>
       </div>
-      <div class="dialog-actions">
+      <div class="dialog-actions" id="quoteFormActions">
         <button type="button" class="small" id="quoteCancel">Cancel</button>
         <button type="submit" class="primary" style="margin-top:0" id="quoteSubmit">Send</button>
       </div>
       <p class="sent-ok" id="quoteSent" hidden>Thanks — your request has been recorded.</p>
       <p class="sent-err" id="quoteError" hidden>Couldn't send — please try again.</p>
+      <div class="quote-handoff" id="quoteHandoff" hidden>
+        <p class="copy-hint" id="quoteCopyHint">Paste into Pole Barn Pro → Website Leads → Paste JSON.</p>
+        <button type="button" class="primary" id="quoteCopyJson">Copy lead JSON</button>
+        <p class="copied-ok" id="quoteCopied" hidden>Copied!</p>
+        <div class="dialog-actions">
+          <button type="button" class="small" id="quoteDone">Done</button>
+        </div>
+      </div>
     </form>
   </dialog>
 

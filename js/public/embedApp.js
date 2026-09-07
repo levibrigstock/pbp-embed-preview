@@ -592,18 +592,112 @@ function renderOpeningList() {
 
 function bindQuoteDialog() {
   const dlg = $('quoteDialog');
-  $('requestQuoteBtn').addEventListener('click', () => {
+  let pendingRecord = null;
+  let closeTimer = null;
+
+  function clearCloseTimer() {
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  }
+
+  function resetQuoteUi() {
+    clearCloseTimer();
+    pendingRecord = null;
     $('quoteSent').hidden = true;
     $('quoteError').hidden = true;
+    const handoff = $('quoteHandoff');
+    if (handoff) handoff.hidden = true;
+    const copied = $('quoteCopied');
+    if (copied) copied.hidden = true;
+    const hint = $('quoteCopyHint');
+    if (hint) hint.hidden = true;
+    const formFields = $('quoteFormFields');
+    if (formFields) formFields.hidden = false;
+    const actions = $('quoteFormActions');
+    if (actions) actions.hidden = false;
+  }
+
+  function showCopyLeadUi({ keepOpen, hint }) {
+    const handoff = $('quoteHandoff');
+    if (!handoff) return;
+    handoff.hidden = false;
+    const hintEl = $('quoteCopyHint');
+    if (hintEl) {
+      hintEl.hidden = !hint;
+      if (hint) {
+        hintEl.textContent =
+          'Paste into Pole Barn Pro → Website Leads → Paste JSON.';
+      }
+    }
+    const copied = $('quoteCopied');
+    if (copied) copied.hidden = true;
+    if (!keepOpen) {
+      clearCloseTimer();
+      closeTimer = setTimeout(() => dlg.close(), 1800);
+    }
+  }
+
+  async function copyPendingLeadJson() {
+    if (!pendingRecord) return;
+    const json = JSON.stringify(pendingRecord, null, 2);
+    let ok = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(json);
+        ok = true;
+      }
+    } catch (_) {}
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = json;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (_) {
+        ok = false;
+      }
+    }
+    if (!ok) {
+      window.prompt('Copy lead JSON:', json);
+      return;
+    }
+    const copied = $('quoteCopied');
+    if (copied) {
+      copied.hidden = false;
+      setTimeout(() => {
+        if (copied) copied.hidden = true;
+      }, 1600);
+    }
+  }
+
+  $('requestQuoteBtn').addEventListener('click', () => {
+    resetQuoteUi();
     if (typeof dlg.showModal === 'function') dlg.showModal();
     else dlg.setAttribute('open', '');
   });
-  $('quoteCancel').addEventListener('click', () => dlg.close());
+  $('quoteCancel').addEventListener('click', () => {
+    clearCloseTimer();
+    dlg.close();
+  });
+  $('quoteDone')?.addEventListener('click', () => {
+    clearCloseTimer();
+    dlg.close();
+  });
+  $('quoteCopyJson')?.addEventListener('click', () => {
+    copyPendingLeadJson();
+  });
 
   $('quoteForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const submitBtn = $('quoteSubmit');
-    if (submitBtn.disabled) return; // a submit is already in flight
+    if (submitBtn.disabled) return;
 
     const lead = {
       name: $('leadName').value.trim(),
@@ -613,20 +707,31 @@ function bindQuoteDialog() {
     if (!lead.name || !lead.phone || !lead.email) return;
 
     const record = buildLeadRecord(lead);
+    pendingRecord = record;
     $('quoteSent').hidden = true;
     $('quoteError').hidden = true;
+    const handoff = $('quoteHandoff');
+    if (handoff) handoff.hidden = true;
     submitBtn.disabled = true;
     submitBtn.textContent = 'Sending…';
 
     try {
-      await handoffLead(record); // resolves once any configured POST succeeds
+      const result = await handoffLead(record);
       $('quoteSent').hidden = false;
-      setTimeout(() => dlg.close(), 1400);
+      const usedWebhook = !!(result && result.webhook);
+      if (!usedWebhook) {
+        const formFields = $('quoteFormFields');
+        if (formFields) formFields.hidden = true;
+        const actions = $('quoteFormActions');
+        if (actions) actions.hidden = true;
+        showCopyLeadUi({ keepOpen: true, hint: true });
+      } else {
+        showCopyLeadUi({ keepOpen: false, hint: false });
+      }
     } catch (err) {
-      // The localStorage / postMessage copies are already written; only the
-      // webhook POST failed. Let the visitor retry without re-entering details.
       console.warn('[embed] lead webhook delivery failed', err);
       $('quoteError').hidden = false;
+      showCopyLeadUi({ keepOpen: true, hint: true });
     } finally {
       submitBtn.disabled = false;
       submitBtn.textContent = 'Send';
@@ -683,7 +788,7 @@ async function handoffLead(record) {
   }
 
   const endpoint = await resolveLeadWebhook();
-  if (!endpoint) return; // no webhook configured — local + postMessage only
+  if (!endpoint) return { webhook: false }; // local + postMessage only
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -691,6 +796,7 @@ async function handoffLead(record) {
     body: JSON.stringify(record),
   });
   if (!res.ok) throw new Error(`Lead webhook responded ${res.status}`);
+  return { webhook: true };
 }
 
 /** True only for a well-formed absolute https:// URL. */

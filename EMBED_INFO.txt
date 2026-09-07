@@ -1,7 +1,7 @@
-Synced from polebarn-pro develop @ c1727a1 (2026-09-07T10:30Z)
+Synced from polebarn-pro develop @ 7c4edd4 (2026-09-07T10:43Z)
 
 PoleBarn Pro — public configurator embed package
-built: 2026-09-07T10:30:13Z
+built: 2026-09-07T10:43:35Z
 entry: /public/embed.html?companyId=demo
 pack:  scripts/pack-embed.sh
 docs:  EMBED_HOSTING.md (repo root)

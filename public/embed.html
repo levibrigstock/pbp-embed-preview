@@ -313,6 +313,11 @@
       font-size: 13px;
       margin-top: 10px;
     }
+    .sent-err {
+      color: #ff9a9a;
+      font-size: 13px;
+      margin-top: 10px;
+    }
 
     .foot {
       color: var(--muted);
@@ -475,6 +480,7 @@
         <button type="submit" class="primary" style="margin-top:0" id="quoteSubmit">Send</button>
       </div>
       <p class="sent-ok" id="quoteSent" hidden>Thanks — your request has been recorded.</p>
+      <p class="sent-err" id="quoteError" hidden>Couldn't send — please try again.</p>
     </form>
   </dialog>
 

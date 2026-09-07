@@ -11,9 +11,12 @@
  *                  ──▶  createProject() / SceneView  (viewer only)
  *
  * "Request a quote" collects name / phone / email and bundles them with the
- * public config. For this slice the lead is logged to the console and appended
- * to localStorage (`polebarnpro:leads:<companyId>`). See handoffLead() for how a
- * company CRM / webhook plugs in later.
+ * public config. handoffLead() always keeps a console + localStorage copy
+ * (`polebarnpro:leads:<companyId>`) and, when a host page asked for it, posts the
+ * record to `window.parent`. When a lead webhook is configured (query
+ * `leadWebhook`, `window.__PBP_LEAD_WEBHOOK__`, or a bundled
+ * `public/lead-config.json` keyed by companyId) it also POSTs the JSON record to
+ * that endpoint and the dialog only reports success once the POST resolves.
  */
 
 import {
@@ -84,6 +87,8 @@ async function init() {
     window.__embed = {
       get scene() { return scene; },
       get config() { return config; },
+      resolveLeadWebhook, // Promise<string|null> — check which endpoint is live
+      buildLeadRecord: () => buildLeadRecord({ name: 'Test', phone: '000', email: 't@t' }),
     };
   }
 }
@@ -576,19 +581,23 @@ function renderOpeningList() {
   });
 }
 
-/* ─────────────────────── request quote (lead stub) ─────────────────────── */
+/* ─────────────────────── request quote (lead handoff) ─────────────────────── */
 
 function bindQuoteDialog() {
   const dlg = $('quoteDialog');
   $('requestQuoteBtn').addEventListener('click', () => {
     $('quoteSent').hidden = true;
+    $('quoteError').hidden = true;
     if (typeof dlg.showModal === 'function') dlg.showModal();
     else dlg.setAttribute('open', '');
   });
   $('quoteCancel').addEventListener('click', () => dlg.close());
 
-  $('quoteForm').addEventListener('submit', (e) => {
+  $('quoteForm').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const submitBtn = $('quoteSubmit');
+    if (submitBtn.disabled) return; // a submit is already in flight
+
     const lead = {
       name: $('leadName').value.trim(),
       phone: $('leadPhone').value.trim(),
@@ -597,10 +606,24 @@ function bindQuoteDialog() {
     if (!lead.name || !lead.phone || !lead.email) return;
 
     const record = buildLeadRecord(lead);
-    handoffLead(record);
+    $('quoteSent').hidden = true;
+    $('quoteError').hidden = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Sending…';
 
-    $('quoteSent').hidden = false;
-    setTimeout(() => dlg.close(), 1400);
+    try {
+      await handoffLead(record); // resolves once any configured POST succeeds
+      $('quoteSent').hidden = false;
+      setTimeout(() => dlg.close(), 1400);
+    } catch (err) {
+      // The localStorage / postMessage copies are already written; only the
+      // webhook POST failed. Let the visitor retry without re-entering details.
+      console.warn('[embed] lead webhook delivery failed', err);
+      $('quoteError').hidden = false;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Send';
+    }
   });
 }
 
@@ -618,28 +641,22 @@ function buildLeadRecord(lead) {
 }
 
 /**
- * Lead handoff — STUB for this slice.
+ * Lead handoff.
  *
- * Now:  console.log + append to localStorage `polebarnpro:leads:<companyId>`.
+ * Always: console.log + append to localStorage `polebarnpro:leads:<companyId>` +
+ * (when `?parentOrigin=` is set and we are iframed) postMessage to the host page.
  *
- * Later (company CRM integration), replace the body with one of:
+ * When a lead webhook is configured (see resolveLeadWebhook), also POST the JSON
+ * `record` to it. The returned promise rejects if that POST fails so the dialog
+ * can show a retry banner — the local copies above are already written.
  *
- *   1. Webhook  — POST `record` as JSON to a per-company endpoint resolved from
- *      `companyId` (e.g. an env-configured map or a small `/api/lead` proxy that
- *      looks up the tenant). The proxy forwards to the company's CRM (HubSpot,
- *      Salesforce, Zoho, a Zapier catch-hook, etc.).
- *
- *   2. Email    — the same proxy formats `record` into a templated email to the
- *      company's sales inbox.
- *
- *   3. postMessage — when embedded via iframe, `window.parent.postMessage(record,
- *      targetOrigin)` so the host site's own JS captures the lead. The host page
- *      passes its origin in as `?parentOrigin=` and we validate it.
- *
- * The payload shape (`record`) does not change when the transport changes.
+ * Transports do not change the payload shape (`record`). A future first-party
+ * `/api/lead` Lambda (see aws/lambda/) would be just another webhook URL here: it
+ * would resolve `companyId` to a tenant CRM server-side and re-run
+ * validatePublicConfig() on `record.publicConfig` before trusting it.
  */
-function handoffLead(record) {
-  console.log('[embed] LEAD (stub handoff):', record);
+async function handoffLead(record) {
+  console.log('[embed] LEAD:', record);
   try {
     const prev = JSON.parse(localStorage.getItem(LEADS_KEY) || '[]');
     prev.push(record);
@@ -657,6 +674,58 @@ function handoffLead(record) {
       console.warn('[embed] postMessage to parent failed', err);
     }
   }
+
+  const endpoint = await resolveLeadWebhook();
+  if (!endpoint) return; // no webhook configured — local + postMessage only
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
+  if (!res.ok) throw new Error(`Lead webhook responded ${res.status}`);
+}
+
+/** True only for a well-formed absolute https:// URL. */
+function isHttpsUrl(value) {
+  if (typeof value !== 'string' || !value) return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
+let leadWebhookLookup;
+/**
+ * Resolve the lead webhook URL, first source wins:
+ *   1. `?leadWebhook=` query param  (must be an absolute https URL)
+ *   2. `window.__PBP_LEAD_WEBHOOK__` global  (host page / deploy injects it)
+ *   3. optional `public/lead-config.json` — `{ "<companyId>": { "webhookUrl" },
+ *      "default": { "webhookUrl" } }`. Kept out of git; ship the .example file.
+ * Returns a Promise<string|null>. The lookup (including the fetch) runs once.
+ */
+function resolveLeadWebhook() {
+  if (leadWebhookLookup) return leadWebhookLookup;
+  leadWebhookLookup = (async () => {
+    const fromQuery = params.get('leadWebhook');
+    if (isHttpsUrl(fromQuery)) return fromQuery;
+
+    if (isHttpsUrl(window.__PBP_LEAD_WEBHOOK__)) return window.__PBP_LEAD_WEBHOOK__;
+
+    try {
+      const res = await fetch(new URL('lead-config.json', location.href), { cache: 'no-store' });
+      if (res.ok) {
+        const map = await res.json();
+        const entry = (map && (map[COMPANY_ID] || map.default)) || null;
+        if (entry && isHttpsUrl(entry.webhookUrl)) return entry.webhookUrl;
+      }
+    } catch (_) {
+      /* no lead-config.json deployed — fine, fall through to null */
+    }
+    return null;
+  })();
+  return leadWebhookLookup;
 }
 
 /* ─────────────────────── form <-> config sync ─────────────────────── */

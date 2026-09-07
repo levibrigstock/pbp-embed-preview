@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "region": "us-east-1",
+  "userPoolId": "us-east-1_EXAMPLE",
+  "clientId": "yourAppClientId",
+  "apiBase": "https://xxxxxxxx.execute-api.us-east-1.amazonaws.com"
+}

@@ -68,6 +68,7 @@ async function init() {
   syncFormFromConfig();
 
   await startViewer();
+  bindViewerControls();
   applyConfigToViewer(true);
 }
 
@@ -80,6 +81,23 @@ async function startViewer() {
     scene.showMetal = true;
   } catch (err) {
     console.warn('[embed] 3D engine unavailable', err);
+  }
+}
+
+function bindViewerControls() {
+  const recenter = $('recenterBtn');
+  const reset = $('resetViewBtn');
+  if (recenter) {
+    recenter.addEventListener('click', () => {
+      if (!scene) return;
+      scene.frameAll?.();
+    });
+  }
+  if (reset) {
+    reset.addEventListener('click', () => {
+      if (!scene) return;
+      scene.heroShot?.();
+    });
   }
 }
 
@@ -99,7 +117,7 @@ function applyConfigToViewer(immediate = false) {
     });
     scene.setProject(project);
     scene.resize?.();
-    scene.heroShot?.();
+    if (immediate) scene.heroShot?.();
   };
   if (immediate) run();
   else rebuildTimer = setTimeout(run, 120);

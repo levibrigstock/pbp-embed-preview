@@ -69,6 +69,28 @@
       pointer-events: none;
     }
 
+    .viewer-controls {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 2;
+    }
+    .viewer-controls button {
+      min-width: 44px;
+      min-height: 44px;
+      padding: 8px 12px;
+      background: rgba(23, 19, 31, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.2;
+      backdrop-filter: blur(2px);
+    }
+    .viewer-controls button:active { background: rgba(124, 77, 255, 0.55); }
+
     .controls {
       flex: 1 1 auto;
       overflow-y: auto;
@@ -233,7 +255,11 @@
   <div class="app">
     <div class="viewer">
       <canvas id="viewport"></canvas>
-      <div class="viewer-hint">Drag to rotate · pinch / scroll to zoom</div>
+      <div class="viewer-controls">
+        <button type="button" id="recenterBtn" title="Recenter">Recenter</button>
+        <button type="button" id="resetViewBtn" title="Reset view">Reset view</button>
+      </div>
+      <div class="viewer-hint">Drag to rotate · pinch / scroll to zoom · Recenter if lost</div>
     </div>
 
     <form class="controls" id="cfgForm" autocomplete="off">

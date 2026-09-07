@@ -294,14 +294,16 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt) {
 /** Truss block sets: ~1 per 40′ of length. */
 /**
  * Truss block sets (12′ 2×6). Main: ceil(L/40).
- * SB with lean: +1 (60′ plain → 2; 60′+lean → 3).
+ * A gable-style lean carries its own mini-ridge/truss and needs one extra set
+ * (SB 60′+gable-lean → 3). Shed leans hang off the main purlins and add none
+ * (SB Levi 80′+shed-lean → 2, not 3).
  * @param {number} buildingLengthFt
  * @param {object} [b]
  */
 export function trussBlockQty(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   let n = Math.max(1, Math.ceil(L / 40 - 1e-9));
-  if (b && hasAnyLean(b)) n += 1;
+  if (b) n += gableLeanCount(b);
   return n;
 }
 
@@ -466,7 +468,10 @@ export function ridgeCapPieces(buildingLengthFt, b = null) {
 
 /**
  * Eave edge pieces for both main eaves + lean outer eaves.
- * Main: ceil(2L/10)+extra. Any lean: +1 (SB 60′+lean → 15).
+ * Main: ceil(2L/10)+extra. A gable lean adds an outer eave run that returns to
+ * the main roof at two valleys → +1 stock piece (SB 60′+gable-lean → 15).
+ * Shed leans drain onto the main eave line and add no separate eave-edge stock
+ * (SB Levi 80′+shed-lean → 18, not 19).
  * @param {number} buildingLengthFt
  * @param {object} [b] optional building for lean extras
  */
@@ -474,7 +479,7 @@ export function eaveTrimPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   const stock = TRIM_STOCK_FT;
   let n = Math.max(1, Math.ceil((2 * L) / stock - 1e-9) + trimRunExtraPieces(L));
-  if (b && hasAnyLean(b)) n += 1;
+  if (b && gableLeanCount(b) > 0) n += 1;
   return n;
 }
 

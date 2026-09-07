@@ -17,6 +17,9 @@
  * `leadWebhook`, `window.__PBP_LEAD_WEBHOOK__`, or a bundled
  * `public/lead-config.json` keyed by companyId) it also POSTs the JSON record to
  * that endpoint and the dialog only reports success once the POST resolves.
+ *
+ * Per-company chrome (title, brand strip, optional logo / accent) comes from
+ * `public/company-config.json` keyed by companyId — see resolveCompanyBranding().
  */
 
 import {
@@ -74,6 +77,9 @@ async function init() {
   bindOpenings();
   bindQuoteDialog();
 
+  const branding = await resolveCompanyBranding();
+  applyCompanyBranding(branding);
+
   $('companyFoot').textContent = `Configurator ID: ${COMPANY_ID}`;
   syncFormFromConfig();
 
@@ -88,6 +94,7 @@ async function init() {
       get scene() { return scene; },
       get config() { return config; },
       resolveLeadWebhook, // Promise<string|null> — check which endpoint is live
+      resolveCompanyBranding, // Promise<branding> — displayName / logoUrl / accent
       buildLeadRecord: () => buildLeadRecord({ name: 'Test', phone: '000', email: 't@t' }),
     };
   }
@@ -728,10 +735,100 @@ function resolveLeadWebhook() {
   return leadWebhookLookup;
 }
 
+
+/* ─────────────────────── company branding chrome ─────────────────────── */
+
+const DEFAULT_BRANDING = {
+  displayName: 'Design Your Building',
+  logoUrl: null,
+  accent: null,
+};
+
+let companyBrandingLookup;
+
+/**
+ * Resolve per-company embed chrome from `public/company-config.json`:
+ *   { "<companyId>": { displayName, logoUrl?, accent? }, "default": { … } }
+ * Falls back to DEFAULT_BRANDING when the file is missing or the entry is thin.
+ * logoUrl / accent are only accepted when they look safe (https image URL / CSS color).
+ */
+function resolveCompanyBranding() {
+  if (companyBrandingLookup) return companyBrandingLookup;
+  companyBrandingLookup = (async () => {
+    try {
+      const res = await fetch(new URL('company-config.json', location.href), { cache: 'no-store' });
+      if (!res.ok) return { ...DEFAULT_BRANDING };
+      const map = await res.json();
+      const entry = (map && (map[COMPANY_ID] || map.default)) || null;
+      if (!entry || typeof entry !== 'object') return { ...DEFAULT_BRANDING };
+      const displayName =
+        typeof entry.displayName === 'string' && entry.displayName.trim()
+          ? entry.displayName.trim()
+          : DEFAULT_BRANDING.displayName;
+      const logoUrl = isHttpsUrl(entry.logoUrl) ? entry.logoUrl.trim() : null;
+      const accent = isCssColor(entry.accent) ? entry.accent.trim() : null;
+      return { displayName, logoUrl, accent };
+    } catch (_) {
+      /* no company-config.json deployed — use defaults */
+      return { ...DEFAULT_BRANDING };
+    }
+  })();
+  return companyBrandingLookup;
+}
+
+/** True for a simple CSS color token safe to assign to --accent (hex / rgb / named). */
+function isCssColor(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  const v = value.trim();
+  // Reject urls(), expressions, and anything that could escape a CSS declaration.
+  if (/[;{}]|url\s*\(|expression|@import/i.test(v)) return false;
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) return true;
+  if (/^rgba?\(/i.test(v) || /^hsla?\(/i.test(v)) return true;
+  // Short named colors only (no spaces / punctuation beyond hyphen).
+  if (/^[a-z]{3,20}$/i.test(v)) return true;
+  return false;
+}
+
+/** Apply branding to document title, brand strip, and optional --accent. */
+function applyCompanyBranding(branding) {
+  const name = branding?.displayName || DEFAULT_BRANDING.displayName;
+  document.title = name;
+
+  const strip = $('brandStrip');
+  const nameEl = $('brandName');
+  const logoEl = $('brandLogo');
+  if (nameEl) nameEl.textContent = name;
+  if (logoEl) {
+    if (branding?.logoUrl) {
+      logoEl.src = branding.logoUrl;
+      logoEl.alt = name;
+      logoEl.hidden = false;
+      logoEl.onerror = () => {
+        logoEl.hidden = true;
+        logoEl.removeAttribute('src');
+      };
+    } else {
+      logoEl.hidden = true;
+      logoEl.removeAttribute('src');
+    }
+  }
+  if (strip) strip.hidden = false;
+
+  if (branding?.accent) {
+    document.documentElement.style.setProperty('--accent', branding.accent);
+  }
+
+  // Keep the form h1 in sync when branding is more specific than the generic title.
+  const titleEl = $('title');
+  if (titleEl) {
+    titleEl.textContent = name;
+  }
+}
+
 /* ─────────────────────── form <-> config sync ─────────────────────── */
 
 function syncFormFromConfig() {
-  $('title').textContent = 'Design Your Building';
+  // Page/form title set by applyCompanyBranding(); leave h1 alone here.
   setVal('width', config.building.width);
   setVal('length', config.building.length);
   setVal('eaveHeight', config.building.eaveHeight);

@@ -55,7 +55,7 @@ function formatOpeningLabel(w, h) {
 
 const COLOR_HEX = {
  BK: 0x121212,
- AL: 0xf5e6d3,
+ AL: 0xf7ecd8,
  GAL: 0xc8d0d8,
  WH: 0xffffff,
  BR: 0x6b3f24,
@@ -212,8 +212,14 @@ export class SceneView {
  if (!liteLike) {
  this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
  }
+ // Lite/embed: no ACES — Filmic crush was turning Bright White gray/beige on phones.
+ if (liteLike) {
+ this.renderer.toneMapping = THREE.NoToneMapping;
+ this.renderer.toneMappingExposure = 1;
+ } else {
  this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
- this.renderer.toneMappingExposure = profile === 'safer' ? 1.08 : profile === 'lite' ? 1.22 : 1.18;
+ this.renderer.toneMappingExposure = 1.18;
+ }
  setRendererOutputSRGB(this.renderer);
  }
 
@@ -859,15 +865,19 @@ export class SceneView {
  );
  const screw = screwRow < 0.03 && screwCol < 0.025 ? 0.25 : 0;
 
- // Diffuse — light colors need a high floor or whites read gray on phone
+ // Grayscale shade only — panel hue is material.color (keeps Bright White white).
+ // Light panels: almost no flatten; seams/screws stay subtle.
  const lum = 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b;
- const shadeFloor = lum > 0.7 ? 0.98 : lum > 0.4 ? 0.88 : 0.74;
- const shadeAmp = Math.max(0.12, 1 - shadeFloor);
- const shade = shadeFloor + profile * shadeAmp - seam - screw * 0.35;
+ const shadeFloor = lum > 0.75 ? 1 : lum > 0.45 ? 0.9 : 0.76;
+ const shadeAmp = Math.max(0.08, 1 - shadeFloor) * 0.9;
+ const seamW = lum > 0.75 ? 0.06 : 0.18;
+ const screwW = lum > 0.75 ? 0.12 : 0.35;
+ const shade = Math.max(0.55, shadeFloor + profile * shadeAmp - seam * seamW - screw * screwW);
  const i = (y * W + x) * 4;
- img.data[i] = Math.min(255, Math.max(0, base.r * 255 * shade));
- img.data[i + 1] = Math.min(255, Math.max(0, base.g * 255 * shade));
- img.data[i + 2] = Math.min(255, Math.max(0, base.b * 255 * shade));
+ const g = Math.min(255, Math.max(0, Math.round(255 * shade)));
+ img.data[i] = g;
+ img.data[i + 1] = g;
+ img.data[i + 2] = g;
  img.data[i + 3] = 255;
 
  // Normal map: derivative of profile in U (ribs run along V)
@@ -978,26 +988,33 @@ export class SceneView {
  }
  // Physical metal with clearcoat. Lite/embed: less metal wash so colors read on phone.
  const liteMetal = !!this.lite;
- // Embed/phone: nearly matte painted-metal so customer colors match swatches
- // (high metalness + ACES was washing white → gray and muddying hues).
- return new THREE.MeshPhysicalMaterial({
- color: 0xffffff,
+ const col = new THREE.Color(hex >>> 0);
+ const lum = 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b;
+ const mat = new THREE.MeshPhysicalMaterial({
+ // Hue on the material; map is grayscale rib shade (see _agPanelMaps).
+ color: col,
  map,
  normalMap,
  roughnessMap,
- metalness: opts.metalness ?? (liteMetal ? 0.06 : 0.88),
- roughness: opts.roughness ?? (liteMetal ? 0.72 : 0.28),
+ metalness: opts.metalness ?? (liteMetal ? 0 : 0.88),
+ roughness: opts.roughness ?? (liteMetal ? 0.82 : 0.28),
  clearcoat: opts.clearcoat ?? (liteMetal ? 0 : 0.35),
  clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 1 : 0.28),
  envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0 : 1.15),
  normalScale: new THREE.Vector2(
- opts.normalStrength ?? 1.45,
- opts.normalStrength ?? 1.45,
+ opts.normalStrength ?? (liteMetal ? 0.9 : 1.45),
+ opts.normalStrength ?? (liteMetal ? 0.9 : 1.45),
  ),
  transparent: opts.transparent ?? false,
  opacity: opts.opacity ?? 1,
  side: opts.side ?? THREE.FrontSide,
  });
+ // Tiny emissive lift so Bright White / Alamo don't sink to beige under ambient
+ if (liteMetal && lum > 0.7) {
+ mat.emissive = col.clone();
+ mat.emissiveIntensity = lum > 0.9 ? 0.08 : 0.04;
+ }
+ return mat;
  } catch (err) {
  console.warn('ag panel mat fallback', err);
  return this._metalMat(hex, opts);

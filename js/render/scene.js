@@ -3,9 +3,9 @@
  * Soft shadows, sky, grass, metal roof, sales-ready screenshots.
  */
 
-import * as THREE from 'three';
-// Local OrbitControls (vendor/OrbitControls.js via import map three/addons/)
-import { OrbitControls } from 'three/addons/OrbitControls.js';
+import * as THREE from '../../vendor/three.module.js';
+// Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
+import { OrbitControls } from '../../vendor/OrbitControls.js';
 import { generateFraming } from '../domain/framing.js?v=20260806f';
 import {
  roofRise,

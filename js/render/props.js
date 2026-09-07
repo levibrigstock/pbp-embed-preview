@@ -3,7 +3,7 @@
  * Procedural Three.js meshes (no external model files).
  */
 
-import * as THREE from 'three';
+import * as THREE from '../../vendor/three.module.js';
 
 function mat(color, opts = {}) {
  return new THREE.MeshStandardMaterial({

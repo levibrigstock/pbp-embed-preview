@@ -69,53 +69,60 @@ init().catch((err) => {
 });
 
 async function init() {
-  populateColorSelects();
-  bindBuildingControls();
-  bindColorControls();
-  bindMetalAndConcrete();
-  bindLeanTos();
-  bindOpenings();
-  bindQuoteDialog();
-
-  const branding = await resolveCompanyBranding();
-  applyCompanyBranding(branding);
-
-  $('companyFoot').textContent = `Configurator ID: ${COMPANY_ID}`;
-  syncFormFromConfig();
-
-  await startViewer();
-  bindViewerControls();
   try {
-    applyConfigToViewer(true);
-  } catch (err) {
-    console.warn('[embed] applyConfigToViewer failed', err);
-  }
-  if (scene && !scene.webglOk) {
-    const hint = document.querySelector('.viewer-hint');
-    if (hint) {
-      hint.textContent =
-        '3D preview unavailable on this device — form and quote still work.';
-    }
-  }
-  // Mobile browsers often report 0-height canvas on the first paint; force
-  // resize on the next 1–2 frames so the lite WebGL view actually fills.
-  if (scene?.webglOk) {
-    requestAnimationFrame(() => {
-      scene.resize?.();
-      requestAnimationFrame(() => scene.resize?.());
-    });
-  }
+    populateColorSelects();
+    bindBuildingControls();
+    bindColorControls();
+    bindMetalAndConcrete();
+    bindLeanTos();
+    bindOpenings();
+    bindQuoteDialog();
 
-  // Opt-in debug handle for manual / automated testing (?debug=1). Read-only
-  // getters — no behaviour, nothing sensitive.
-  if (params.get('debug') === '1') {
-    window.__embed = {
-      get scene() { return scene; },
-      get config() { return config; },
-      resolveLeadWebhook, // Promise<string|null> — check which endpoint is live
-      resolveCompanyBranding, // Promise<branding> — displayName / logoUrl / accent
-      buildLeadRecord: () => buildLeadRecord({ name: 'Test', phone: '000', email: 't@t' }),
-    };
+    const branding = await resolveCompanyBranding();
+    applyCompanyBranding(branding);
+
+    $('companyFoot').textContent = `Configurator ID: ${COMPANY_ID}`;
+    syncFormFromConfig();
+
+    await startViewer();
+    bindViewerControls();
+    try {
+      applyConfigToViewer(true);
+    } catch (err) {
+      console.warn('[embed] applyConfigToViewer failed', err);
+    }
+    // Soft device hint only when SceneView constructed but WebGL did not come up.
+    if (scene && !scene.webglOk) {
+      const hint = document.querySelector('.viewer-hint');
+      if (hint) {
+        hint.textContent =
+          '3D preview unavailable on this device — form and quote still work.';
+      }
+    }
+    // Mobile browsers often report 0-height canvas on the first paint; force
+    // resize on the next 1–2 frames so the lite WebGL view actually fills.
+    if (scene?.webglOk) {
+      requestAnimationFrame(() => {
+        scene.resize?.();
+        requestAnimationFrame(() => scene.resize?.());
+      });
+    }
+
+    // Opt-in debug handle for manual / automated testing (?debug=1). Read-only
+    // getters — no behaviour, nothing sensitive.
+    if (params.get('debug') === '1') {
+      window.__embed = {
+        get scene() { return scene; },
+        get config() { return config; },
+        resolveLeadWebhook, // Promise<string|null> — check which endpoint is live
+        resolveCompanyBranding, // Promise<branding> — displayName / logoUrl / accent
+        buildLeadRecord: () => buildLeadRecord({ name: 'Test', phone: '000', email: 't@t' }),
+      };
+    }
+  } catch (err) {
+    console.error('[embed] failed to start', err);
+    const hint = document.querySelector('.viewer-hint');
+    if (hint) hint.textContent = '3D preview unavailable in this browser.';
   }
 }
 
@@ -134,7 +141,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260907a');
+    const { SceneView } = await import('../render/scene.js?v=20260907c');
     // Reuse the viewer's built-in opening placement/drag. The handlers only ever
     // receive plain geometry (wall, offset, size) — no prices, takeoffs, or
     // framing cross this boundary. lite: true keeps phone WebGL from OOMing

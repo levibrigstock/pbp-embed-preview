@@ -65,7 +65,7 @@ let dragListTimer = 0;
 init().catch((err) => {
   console.error('[embed] failed to start', err);
   const hint = document.querySelector('.viewer-hint');
-  if (hint) hint.textContent = '3D preview unavailable in this browser.';
+  if (hint) hint.textContent = '3D preview failed: ' + ((err && (err.message || String(err))) || 'unknown');
 });
 
 async function init() {
@@ -122,30 +122,30 @@ async function init() {
   } catch (err) {
     console.error('[embed] failed to start', err);
     const hint = document.querySelector('.viewer-hint');
-    if (hint) hint.textContent = '3D preview unavailable in this browser.';
+    if (hint) hint.textContent = '3D preview failed: ' + ((err && (err.message || String(err))) || 'unknown');
   }
 }
 
 async function startViewer() {
   const canvas = $('viewport');
-  // Phones / iframes often report 0×0 before first layout — give WebGL a real size.
+  // Wait for layout — Safari often reports 0×0 canvas on the first tick.
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   try {
     const parent = canvas?.parentElement;
     const w = Math.max(parent?.clientWidth || 0, canvas?.clientWidth || 0, 320);
     const h = Math.max(parent?.clientHeight || 0, canvas?.clientHeight || 0, 240);
-    if (canvas && (canvas.width < 2 || canvas.height < 2)) {
+    if (canvas) {
       canvas.width = w;
       canvas.height = h;
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
     }
   } catch (_) {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260907c');
-    // Reuse the viewer's built-in opening placement/drag. The handlers only ever
-    // receive plain geometry (wall, offset, size) — no prices, takeoffs, or
-    // framing cross this boundary. lite: true keeps phone WebGL from OOMing
-    // (no shadows / env map / high-performance GPU hints).
+    const { SceneView } = await import('../render/scene.js?v=20260907d');
+    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,
       onWallClick: (data) => placeOpeningFromViewer(data),
@@ -154,8 +154,20 @@ async function startViewer() {
     });
     scene.showFraming = false;
     scene.showMetal = true;
+    if (!scene.webglOk) {
+      const hint = document.querySelector('.viewer-hint');
+      if (hint) {
+        hint.textContent =
+          '3D preview unavailable on this device — form and quote still work.';
+      }
+    }
   } catch (err) {
     console.warn('[embed] 3D engine unavailable', err);
+    const hint = document.querySelector('.viewer-hint');
+    if (hint) {
+      const msg = (err && (err.message || String(err))) || 'unknown error';
+      hint.textContent = '3D preview failed: ' + msg;
+    }
   }
 }
 

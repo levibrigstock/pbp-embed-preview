@@ -49,6 +49,8 @@ export class SceneView {
  constructor(canvas, handlers = {}) {
  this.canvas = canvas;
  this.handlers = handlers;
+ /** Public embed / phone-safe WebGL path (less GPU, no shadows/env map). */
+ this.lite = !!(handlers.lite || handlers.embed);
  this.mode = 'orbit';
  this.placeOpeningDraft = null;
  /** @type {{ type: string } | null} */
@@ -86,23 +88,111 @@ export class SceneView {
 
  // Create WebGL renderer — do not throw; app UI still works without it
  try {
- this.renderer = new THREE.WebGLRenderer({
+ const primary = this.lite ? 'lite' : 'full';
+ try {
+ this._createRenderer(canvas, primary);
+ } catch (err) {
+ if (!this.lite) throw err;
+ console.warn('Lite WebGL init failed, retrying safer settings', err);
+ this._disposeRendererQuiet();
+ this._createRenderer(canvas, 'safer');
+ }
+ this._attachControls(canvas);
+ if (this.lite) {
+ this._buildSimpleGround();
+ } else {
+ try {
+ this._buildEnvironment();
+ } catch (err) {
+ console.warn('Environment build failed, using plain ground', err);
+ this._buildSimpleGround();
+ }
+ }
+ this._lights();
+ if (!this.lite) {
+ try {
+ this._setupEnvMap();
+ } catch (err) {
+ console.warn('Env map skipped', err);
+ }
+ }
+ this._onResize = () => this.resize();
+ window.addEventListener('resize', this._onResize);
+ canvas.addEventListener('pointerdown', (e) => this._onPointerDown(e));
+ canvas.addEventListener('pointermove', (e) => this._onPointerMove(e));
+ canvas.addEventListener('pointerup', (e) => this._onPointerUp(e));
+ canvas.addEventListener('pointerleave', (e) => this._onPointerUp(e));
+ this.resize();
+ this._running = true;
+ this._loop();
+ } catch (err) {
+ console.error('WebGL unavailable — running without 3D view', err);
+ this.webglOk = false;
+ this._running = false;
+ this._paintWebglFallback(canvas, err);
+ }
+ }
+
+ /** Drop a failed / partial renderer before a safer retry. */
+ _disposeRendererQuiet() {
+ try {
+ if (this.renderer) {
+ this.renderer.dispose?.();
+ }
+ } catch (_) {}
+ this.renderer = null;
+ this.webglOk = false;
+ }
+
+ /**
+ * @param {HTMLCanvasElement} canvas
+ * @param {'full'|'lite'|'safer'} profile
+ */
+ _createRenderer(canvas, profile) {
+ const liteLike = profile === 'lite' || profile === 'safer';
+ const opts =
+ profile === 'full'
+ ? {
  canvas,
  antialias: true,
  alpha: false,
  preserveDrawingBuffer: true,
  powerPreference: 'high-performance',
- });
+ }
+ : profile === 'lite'
+ ? {
+ canvas,
+ antialias: false,
+ alpha: false,
+ preserveDrawingBuffer: false,
+ powerPreference: 'default',
+ }
+ : {
+ // Even safer retry for phones that still OOM/crash on first lite init
+ canvas,
+ antialias: false,
+ alpha: false,
+ preserveDrawingBuffer: false,
+ powerPreference: 'low-power',
+ failIfMajorPerformanceCaveat: false,
+ };
+ this.renderer = new THREE.WebGLRenderer(opts);
  const gl = this.renderer.getContext?.();
  if (!gl) throw new Error('No WebGL context');
  this.webglOk = true;
- this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
- this.renderer.shadowMap.enabled = true;
+ const dpr = window.devicePixelRatio || 1;
+ const prCap = profile === 'full' ? 2 : profile === 'lite' ? 1.25 : 1;
+ this.renderer.setPixelRatio(Math.min(dpr, prCap));
+ this.renderer.shadowMap.enabled = !liteLike;
+ if (!liteLike) {
  this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+ }
  this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
- this.renderer.toneMappingExposure = 1.18;
+ this.renderer.toneMappingExposure = liteLike ? 1.05 : 1.18;
  this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+ }
 
+ _attachControls(canvas) {
  this.controls = new OrbitControls(this.camera, canvas);
  this.controls.enableDamping = true;
  this.controls.dampingFactor = 0.055;
@@ -122,36 +212,6 @@ export class SceneView {
  MIDDLE: THREE.MOUSE.PAN,
  RIGHT: THREE.MOUSE.PAN,
  };
-
- try {
- this._buildEnvironment();
- } catch (err) {
- console.warn('Environment build failed, using plain ground', err);
- this._buildSimpleGround();
- }
- this._lights();
- try {
- this._setupEnvMap();
- } catch (err) {
- console.warn('Env map skipped', err);
- }
-
- this._onResize = () => this.resize();
- window.addEventListener('resize', this._onResize);
- canvas.addEventListener('pointerdown', (e) => this._onPointerDown(e));
- canvas.addEventListener('pointermove', (e) => this._onPointerMove(e));
- canvas.addEventListener('pointerup', (e) => this._onPointerUp(e));
- canvas.addEventListener('pointerleave', (e) => this._onPointerUp(e));
-
- this.resize();
- this._running = true;
- this._loop();
- } catch (err) {
- console.error('WebGL unavailable — running without 3D view', err);
- this.webglOk = false;
- this._running = false;
- this._paintWebglFallback(canvas, err);
- }
  }
 
  _paintWebglFallback(canvas, err) {
@@ -166,6 +226,15 @@ export class SceneView {
  'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;background:#1a1520;color:#f0d0b0;font:14px system-ui;z-index:5;';
  parent.appendChild(note);
  }
+ if (this.lite) {
+ note.innerHTML =
+ '<div><b>3D view could not start on this device</b><br/><br/>' +
+ 'Building sizes and the quote form still work — you can finish your request without the 3D preview.<br/>' +
+ 'Try another browser, or open this page on a desktop if you need the viewer.<br/><br/>' +
+ '<span style="opacity:.7;font-size:12px">' +
+ String(err?.message || err || '') +
+ '</span></div>';
+ } else {
  note.innerHTML =
  '<div><b>3D view could not start (WebGL)</b><br/><br/>' +
  'The rest of the app still works (sizes, item list, save/load).<br/>' +
@@ -173,6 +242,7 @@ export class SceneView {
  '<span style="opacity:.7;font-size:12px">' +
  String(err?.message || err || '') +
  '</span></div>';
+ }
  if (canvas) canvas.style.display = 'none';
  } catch (_) {}
  }
@@ -583,6 +653,7 @@ export class SceneView {
 
  /** Image-based lighting so metal panels catch sky reflections */
  _setupEnvMap() {
+ if (this.lite) return;
  try {
  const pmrem = new THREE.PMREMGenerator(this.renderer);
  pmrem.compileEquirectangularShader();
@@ -642,8 +713,9 @@ export class SceneView {
  this.scene.add(hemi);
 
  // Key sun
- this.sun = new THREE.DirectionalLight(0xfff2dc, 1.55);
+ this.sun = new THREE.DirectionalLight(0xfff2dc, this.lite ? 1.35 : 1.55);
  this.sun.position.set(55, 95, 38);
+ if (!this.lite) {
  this.sun.castShadow = true;
  this.sun.shadow.mapSize.set(3072, 3072);
  this.sun.shadow.camera.near = 1;
@@ -655,6 +727,9 @@ export class SceneView {
  this.sun.shadow.bias = -0.0002;
  this.sun.shadow.normalBias = 0.035;
  this.sun.shadow.radius = 2.5;
+ } else {
+ this.sun.castShadow = false;
+ }
  this.scene.add(this.sun);
  this.scene.add(this.sun.target);
 

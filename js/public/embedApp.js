@@ -86,6 +86,14 @@ async function init() {
   await startViewer();
   bindViewerControls();
   applyConfigToViewer(true);
+  // Mobile browsers often report 0-height canvas on the first paint; force
+  // resize on the next 1–2 frames so the lite WebGL view actually fills.
+  if (scene?.webglOk) {
+    requestAnimationFrame(() => {
+      scene.resize?.();
+      requestAnimationFrame(() => scene.resize?.());
+    });
+  }
 
   // Opt-in debug handle for manual / automated testing (?debug=1). Read-only
   // getters — no behaviour, nothing sensitive.
@@ -103,11 +111,13 @@ async function init() {
 async function startViewer() {
   const canvas = $('viewport');
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260902e');
+    const { SceneView } = await import('../render/scene.js?v=20260907a');
     // Reuse the viewer's built-in opening placement/drag. The handlers only ever
     // receive plain geometry (wall, offset, size) — no prices, takeoffs, or
-    // framing cross this boundary.
+    // framing cross this boundary. lite: true keeps phone WebGL from OOMing
+    // (no shadows / env map / high-performance GPU hints).
     scene = new SceneView(canvas, {
+      lite: true,
       onWallClick: (data) => placeOpeningFromViewer(data),
       onOpeningMove: (data) => dragOpeningFromViewer(data),
       onOpeningClick: (data) => flashOpeningRow(data?.openingId, false),

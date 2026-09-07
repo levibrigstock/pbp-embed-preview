@@ -29,6 +29,7 @@ import {
   PUBLIC_WALL_LABELS,
   PUBLIC_OPENING_TYPES,
   PUBLIC_OPENING_TYPE_KEYS,
+  PUBLIC_LIMITS,
   PUBLIC_SCHEMA_VERSION,
 } from './publicConfig.js';
 
@@ -48,6 +49,10 @@ let config = loadSavedConfig() || validatePublicConfig(defaultPublicConfig(COMPA
 
 let scene = null;
 let rebuildTimer = 0;
+
+/** Active "tap a wall to drop this" draft, or null. Viewer-only UI state. */
+let placeDraft = null;
+let dragListTimer = 0;
 
 init().catch((err) => {
   console.error('[embed] failed to start', err);
@@ -70,13 +75,29 @@ async function init() {
   await startViewer();
   bindViewerControls();
   applyConfigToViewer(true);
+
+  // Opt-in debug handle for manual / automated testing (?debug=1). Read-only
+  // getters — no behaviour, nothing sensitive.
+  if (params.get('debug') === '1') {
+    window.__embed = {
+      get scene() { return scene; },
+      get config() { return config; },
+    };
+  }
 }
 
 async function startViewer() {
   const canvas = $('viewport');
   try {
     const { SceneView } = await import('../render/scene.js?v=20260902e');
-    scene = new SceneView(canvas, {}); // no edit handlers — view only
+    // Reuse the viewer's built-in opening placement/drag. The handlers only ever
+    // receive plain geometry (wall, offset, size) — no prices, takeoffs, or
+    // framing cross this boundary.
+    scene = new SceneView(canvas, {
+      onWallClick: (data) => placeOpeningFromViewer(data),
+      onOpeningMove: (data) => dragOpeningFromViewer(data),
+      onOpeningClick: (data) => flashOpeningRow(data?.openingId, false),
+    });
     scene.showFraming = false;
     scene.showMetal = true;
   } catch (err) {
@@ -260,10 +281,185 @@ function renderLeanList() {
 
 function bindOpenings() {
   $('addOpening').addEventListener('click', () => {
+    if (!openingCapacityLeft()) return;
     config.openings.push(defaultPublicOpening({ type: 'window', wall: 'front' }));
     commit();
     renderOpeningList();
+    flashOpeningRow(config.openings[config.openings.length - 1].id);
   });
+
+  document.querySelectorAll('[data-add-type]').forEach((btn) => {
+    btn.addEventListener('click', () => enterPlaceMode(btn.dataset.addType));
+  });
+
+  $('placeCancel').addEventListener('click', exitViewerEditMode);
+  $('moveOpeningToggle').addEventListener('click', toggleMoveMode);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && viewerReady() && scene.mode !== 'orbit') exitViewerEditMode();
+  });
+}
+
+/** The 3D viewer is present AND actually rendering (WebGL up). */
+function viewerReady() {
+  return !!(scene && scene.webglOk);
+}
+
+/** True if another opening can be added; otherwise flash a limit hint. */
+function openingCapacityLeft() {
+  if (config.openings.length < PUBLIC_LIMITS.opening.maxCount) return true;
+  showBanner(`You can add up to ${PUBLIC_LIMITS.opening.maxCount} openings.`, false);
+  setTimeout(exitViewerEditMode, 1600);
+  return false;
+}
+
+/* ── viewer edit modes ── */
+
+/**
+ * Enter "tap a wall to drop a <type>" mode. Falls back to a plain list add when
+ * the 3D viewer is unavailable (no WebGL).
+ */
+function enterPlaceMode(type) {
+  const t = PUBLIC_OPENING_TYPES[type] ? type : 'window';
+  const def = PUBLIC_OPENING_TYPES[t];
+
+  if (!viewerReady()) {
+    // No 3D view to tap — just add it to the list.
+    if (!openingCapacityLeft()) return;
+    config.openings.push(defaultPublicOpening({ type: t, wall: 'front' }));
+    commit();
+    renderOpeningList();
+    flashOpeningRow(config.openings[config.openings.length - 1].id);
+    return;
+  }
+
+  // Toggle off if the same chip is tapped again.
+  if (scene.mode === 'place-opening' && placeDraft && placeDraft.type === t) {
+    exitViewerEditMode();
+    return;
+  }
+  if (!openingCapacityLeft()) return;
+
+  placeDraft = {
+    type: t,
+    width: def.defaultW,
+    height: def.defaultH,
+    sillHeight: def.defaultSill,
+  };
+  scene.setPlaceOpeningDraft(placeDraft);
+  scene.setMode('place-opening');
+  $('moveOpeningToggle').classList.remove('active');
+  setPaletteActive(t);
+  showBanner(`Tap a wall to add a ${def.label.toLowerCase()}`, true);
+}
+
+function toggleMoveMode() {
+  if (!viewerReady()) {
+    showBanner('The 3D view is needed to drag openings. Edit the offset in the list instead.', false);
+    return;
+  }
+  if (scene.mode === 'move-opening') {
+    exitViewerEditMode();
+    return;
+  }
+  if (!config.openings.length) {
+    showBanner('Add a window or door first, then drag it.', false);
+    setTimeout(exitViewerEditMode, 1600);
+    return;
+  }
+  placeDraft = null;
+  scene.setPlaceOpeningDraft(null);
+  scene.setMode('move-opening');
+  setPaletteActive(null);
+  $('moveOpeningToggle').classList.add('active');
+  showBanner('Drag an opening along its wall. Release to set the position.', true);
+}
+
+function exitViewerEditMode() {
+  placeDraft = null;
+  if (scene) {
+    scene.setPlaceOpeningDraft(null);
+    scene.setMode('orbit');
+  }
+  setPaletteActive(null);
+  $('moveOpeningToggle').classList.remove('active');
+  $('placeBanner').hidden = true;
+}
+
+function setPaletteActive(type) {
+  document.querySelectorAll('[data-add-type]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.addType === type);
+  });
+}
+
+let bannerHideTimer = 0;
+function showBanner(text, keepOpen) {
+  $('placeBannerText').textContent = text;
+  $('placeBanner').hidden = false;
+  clearTimeout(bannerHideTimer);
+  if (keepOpen) return;
+  // Transient notice: hide it again unless we're mid edit-mode.
+  bannerHideTimer = setTimeout(() => {
+    if (!scene || scene.mode === 'orbit') $('placeBanner').hidden = true;
+  }, 2200);
+}
+
+/* ── viewer → publicConfig ── */
+
+/** A wall was tapped in place-opening mode. */
+function placeOpeningFromViewer(data) {
+  // The public embed only exposes main-building walls.
+  if (data.host && data.host !== 'main') {
+    showBanner('Openings can only go on the four main walls here.', false);
+    return;
+  }
+  const draft = placeDraft || {};
+  const op = defaultPublicOpening({
+    type: PUBLIC_OPENING_TYPES[data.type] ? data.type : draft.type || 'window',
+    wall: data.wall,
+    width: data.width ?? draft.width,
+    height: data.height ?? draft.height,
+    sillHeight: data.sillHeight ?? draft.sillHeight,
+    offset: data.offset,
+  });
+  config.openings.push(op);
+  if (scene) scene.selectedOpeningId = op.id;
+  commit();
+  renderOpeningList();
+  exitViewerEditMode();
+  flashOpeningRow(op.id);
+}
+
+/** An existing opening is being dragged along its wall. */
+function dragOpeningFromViewer(data) {
+  const i = config.openings.findIndex((o) => o.id === data.openingId);
+  if (i < 0) return;
+  config.openings[i] = defaultPublicOpening({
+    ...config.openings[i],
+    offset: data.offset,
+  });
+
+  if (data.live) {
+    // The viewer moves its own mesh during the drag — just keep the form list
+    // roughly in step without a full scene rebuild.
+    clearTimeout(dragListTimer);
+    dragListTimer = setTimeout(renderOpeningList, 120);
+    return;
+  }
+  commit(); // drop: re-validate, persist, rebuild viewer to the committed offset
+  renderOpeningList();
+}
+
+function flashOpeningRow(id, scroll = true) {
+  if (!id) return;
+  clearTimeout(dragListTimer);
+  renderOpeningList();
+  const row = document.querySelector(`#openingList .list-item[data-oid="${id}"]`);
+  if (!row) return;
+  if (scroll) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  row.classList.remove('flash');
+  void row.offsetWidth; // restart the animation
+  row.classList.add('flash');
 }
 
 function renderOpeningList() {
@@ -271,6 +467,7 @@ function renderOpeningList() {
   host.innerHTML = '';
   config.openings.forEach((op, i) => {
     const item = el('div', 'list-item');
+    item.dataset.oid = op.id;
     const typeOpts = PUBLIC_OPENING_TYPE_KEYS.map(
       (t) => `<option value="${t}" ${t === op.type ? 'selected' : ''}>${PUBLIC_OPENING_TYPES[t].label}</option>`,
     ).join('');
@@ -314,8 +511,9 @@ function renderOpeningList() {
     });
 
     item.querySelector('[data-sel="type"]').addEventListener('change', (e) => {
-      // Re-seed size defaults for the new type, keep wall/offset.
+      // Re-seed size defaults for the new type, keep id/wall/offset.
       config.openings[i] = defaultPublicOpening({
+        id: op.id,
         type: e.target.value,
         wall: op.wall,
         offset: op.offset,

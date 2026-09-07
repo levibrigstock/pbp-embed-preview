@@ -350,6 +350,10 @@ export function publicConfigToBuildingPartial(publicConfig) {
     })),
 
     openings: cfg.openings.map((op) => ({
+      // Keep the public id so the viewer's drag/select events map back to the
+      // exact entry in publicConfig.openings (the id is already part of the
+      // public contract and the lead payload).
+      id: op.id,
       type: op.type,
       wall: op.wall,
       width: op.width,

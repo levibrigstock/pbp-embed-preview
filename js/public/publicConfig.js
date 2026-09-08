@@ -48,19 +48,19 @@ export const PUBLIC_ROOF_STYLES = ['gable', 'mono'];
  * UI shows the label + a swatch; only the code travels in the payload.
  */
 export const PUBLIC_COLORS = {
-  // Tuned for phone/embed contrast (true white vs warm Alamo; punchier hues).
-  BK: { label: 'Matte Black', hex: '#121212' },
-  AL: { label: 'Alamo White', hex: '#f7ecd8' },
-  GAL: { label: 'Galvalume', hex: '#c8d0d8' },
-  WH: { label: 'Bright White', hex: '#ffffff' },
-  BR: { label: 'Brown', hex: '#6b3f24' },
-  TN: { label: 'Tan', hex: '#d4b896' },
-  GR: { label: 'Evergreen', hex: '#1f6b38' },
-  RD: { label: 'Crimson Red', hex: '#b01e1e' },
-  BU: { label: 'Burgundy', hex: '#7a1838' },
-  SL: { label: 'Charcoal / Slate', hex: '#4a5160' },
-  LB: { label: 'Light Blue', hex: '#4f8fc4' },
-  CG: { label: 'Clay / Claystone', hex: '#b08455' },
+  // First-pass mill-typical hexes paired to Item 13 names (lock to chip photos later).
+  BK: { label: 'Matte Black', hex: '#0e0e10', item13: 'MATTEBLACK' },
+  AL: { label: 'Alamo White', hex: '#f3e6c8', item13: 'ALAMOWHITE' },
+  GAL: { label: 'Galvalume', hex: '#8e98a1', item13: 'GALVALUME' },
+  WH: { label: 'Brilliant White', hex: '#f7f7f4', item13: 'BRILLIANTWHITE' },
+  BR: { label: 'Brown', hex: '#5a351c', item13: 'BROWN' },
+  TN: { label: 'Tan', hex: '#c9a057', item13: 'TAN' },
+  GR: { label: 'Hunter Green', hex: '#145a2e', item13: 'HUNTERGREEN' },
+  RD: { label: 'Rustic Red', hex: '#9a1f1a', item13: 'RUSTICRED' },
+  BU: { label: 'Burgundy', hex: '#6b142e', item13: 'BURGUNDY' },
+  SL: { label: 'Charcoal', hex: '#2a2e34', item13: 'CHARCOAL' },
+  LB: { label: 'Ocean Blue', hex: '#2e6fa8', item13: 'OCEANBLUE' },
+  CG: { label: 'Light Stone', hex: '#d2b48c', item13: 'LIGHTSTONE' },
 };
 
 export const PUBLIC_COLOR_CODES = Object.keys(PUBLIC_COLORS);

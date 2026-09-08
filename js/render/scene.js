@@ -53,19 +53,20 @@ function formatOpeningLabel(w, h) {
  }
 }
 
+// Keep in sync with js/public/publicConfig.js PUBLIC_COLORS (first-pass; chip-lock later).
 const COLOR_HEX = {
- BK: 0x121212,
- AL: 0xf7ecd8,
- GAL: 0xc8d0d8,
- WH: 0xffffff,
- BR: 0x6b3f24,
- TN: 0xd4b896,
- GR: 0x1f6b38,
- RD: 0xb01e1e,
- BU: 0x7a1838,
- SL: 0x4a5160,
- LB: 0x4f8fc4,
- CG: 0xb08455,
+ BK: 0x0e0e10,
+ AL: 0xf3e6c8,
+ GAL: 0x8e98a1,
+ WH: 0xf7f7f4,
+ BR: 0x5a351c,
+ TN: 0xc9a057,
+ GR: 0x145a2e,
+ RD: 0x9a1f1a,
+ BU: 0x6b142e,
+ SL: 0x2a2e34,
+ LB: 0x2e6fa8,
+ CG: 0xd2b48c,
 };
 
 export class SceneView {
@@ -94,8 +95,8 @@ export class SceneView {
  this.webglOk = false;
  this.renderer = null;
  this.scene = new THREE.Scene();
- this.scene.background = new THREE.Color(this.lite ? 0xa8c8e0 : 0x7eb4d8);
- this.scene.fog = new THREE.FogExp2(this.lite ? 0xd8e4ec : 0xc5dce8, this.lite ? 0.0007 : 0.00135);
+ this.scene.background = new THREE.Color(this.lite ? 0xc5d0d8 : 0x7eb4d8);
+ this.scene.fog = new THREE.FogExp2(this.lite ? 0xe4e8ec : 0xc5dce8, this.lite ? 0.0005 : 0.00135);
  this.camera = new THREE.PerspectiveCamera(38, 1, 0.4, 900);
  this.camera.position.set(72, 28, 78);
  this.controls = null;
@@ -740,18 +741,18 @@ export class SceneView {
 
  _lights() {
  // Lite/embed: neutral lights so white panels don't pick up sky blue.
- const amb = new THREE.AmbientLight(this.lite ? 0xf0f0f0 : 0xd0e0f0, this.lite ? 0.55 : 0.22);
+ const amb = new THREE.AmbientLight(this.lite ? 0xfff8f0 : 0xd0e0f0, this.lite ? 0.72 : 0.22);
  this.scene.add(amb);
 
  const hemi = new THREE.HemisphereLight(
- this.lite ? 0xffffff : 0xe8f2ff,
- this.lite ? 0xb0b0b0 : 0x5a7048,
- this.lite ? 0.45 : 0.62,
+ this.lite ? 0xfffaf5 : 0xe8f2ff,
+ this.lite ? 0xc8c0b0 : 0x5a7048,
+ this.lite ? 0.38 : 0.62,
  );
  this.scene.add(hemi);
 
  // Key sun
- this.sun = new THREE.DirectionalLight(this.lite ? 0xffffff : 0xfff2dc, this.lite ? 1.15 : 1.55);
+ this.sun = new THREE.DirectionalLight(this.lite ? 0xfff5ea : 0xfff2dc, this.lite ? 1.35 : 1.55);
  this.sun.position.set(55, 95, 38);
  if (!this.lite) {
  this.sun.castShadow = true;
@@ -772,7 +773,7 @@ export class SceneView {
  this.scene.add(this.sun.target);
 
  // Cool fill
- const fill = new THREE.DirectionalLight(this.lite ? 0xe8e8e8 : 0xb0ccf0, this.lite ? 0.25 : 0.42);
+ const fill = new THREE.DirectionalLight(this.lite ? 0xf0ebe4 : 0xb0ccf0, this.lite ? 0.18 : 0.42);
  fill.position.set(-45, 35, -55);
  this.scene.add(fill);
 
@@ -870,11 +871,12 @@ export class SceneView {
  // Grayscale shade only — panel hue is material.color (keeps Bright White white).
  // Light panels: almost no flatten; seams/screws stay subtle.
  const lum = 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b;
- const shadeFloor = lum > 0.75 ? 1 : lum > 0.45 ? 0.9 : 0.76;
- const shadeAmp = Math.max(0.08, 1 - shadeFloor) * 0.9;
- const seamW = lum > 0.75 ? 0.06 : 0.18;
- const screwW = lum > 0.75 ? 0.12 : 0.35;
- const shade = Math.max(0.55, shadeFloor + profile * shadeAmp - seam * seamW - screw * screwW);
+ // Bright panels: keep map near-white so WH/AL don't go gray when multiplied.
+ const shadeFloor = lum > 0.85 ? 0.97 : lum > 0.7 ? 0.93 : lum > 0.45 ? 0.88 : 0.76;
+ const shadeAmp = Math.max(0.04, 1 - shadeFloor) * 0.7;
+ const seamW = lum > 0.7 ? 0.04 : 0.18;
+ const screwW = lum > 0.7 ? 0.08 : 0.35;
+ const shade = Math.max(lum > 0.7 ? 0.88 : 0.55, shadeFloor + profile * shadeAmp - seam * seamW - screw * screwW);
  const i = (y * W + x) * 4;
  const g = Math.min(255, Math.max(0, Math.round(255 * shade)));
  img.data[i] = g;
@@ -944,6 +946,17 @@ export class SceneView {
    * Shared wall-skin look (main + lean use identical params).
    */
  _wallPanelOpts(extra = {}) {
+ // Lite/embed: matte, low metal — high metalness was washing whites to gray on phones.
+ if (this.lite) {
+ return {
+ metalness: 0.05,
+ roughness: 0.78,
+ normalStrength: 0.85,
+ clearcoat: 0,
+ clearcoatRoughness: 1,
+ ...extra,
+ };
+ }
  return {
  metalness: 0.78,
  roughness: 0.32,
@@ -1011,10 +1024,10 @@ export class SceneView {
  opacity: opts.opacity ?? 1,
  side: opts.side ?? THREE.FrontSide,
  });
- // Tiny emissive lift so Bright White / Alamo don't sink to beige under ambient
- if (liteMetal && lum > 0.7) {
+ // Emissive lift so Brilliant/Alamo white read white on phone (not gray)
+ if (liteMetal && lum > 0.65) {
  mat.emissive = col.clone();
- mat.emissiveIntensity = lum > 0.9 ? 0.08 : 0.04;
+ mat.emissiveIntensity = lum > 0.85 ? 0.14 : lum > 0.75 ? 0.09 : 0.05;
  }
  return mat;
  } catch (err) {

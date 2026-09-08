@@ -185,18 +185,20 @@ export class SceneView {
  : profile === 'lite'
  ? {
  // Sharp on modern phones (iPhone etc.); still no shadows/env map.
+ // preserveDrawingBuffer so embed quote elevations can toDataURL reliably.
  canvas,
  antialias: true,
  alpha: false,
- preserveDrawingBuffer: false,
+ preserveDrawingBuffer: true,
  powerPreference: 'default',
  }
  : {
  // Even safer retry if sharp lite OOMs/crashes
+ // preserveDrawingBuffer: same — elevation capture after render.
  canvas,
  antialias: false,
  alpha: false,
- preserveDrawingBuffer: false,
+ preserveDrawingBuffer: true,
  powerPreference: 'low-power',
  failIfMajorPerformanceCaveat: false,
  };
@@ -1477,13 +1479,78 @@ export class SceneView {
  }
 
  /**
+ * True when a toDataURL PNG looks empty / solid (iOS Safari blank buffer).
+ * Real building elevations at export size are much larger than a flat fill.
+ * @param {string} dataUrl
+ * @returns {boolean}
+ */
+ _isBlankElevationDataUrl(dataUrl) {
+ if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image')) {
+ return true;
+ }
+ const comma = dataUrl.indexOf(',');
+ const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+ // Solid-color / cleared buffers encode tiny; building shots are typically >> 8KB b64.
+ if (b64.length < 8000) return true;
+ // Optional pixel sample via WebGL readPixels (needs preserveDrawingBuffer).
+ try {
+ const gl = this.renderer?.getContext?.();
+ const canvas = this.renderer?.domElement;
+ if (!gl || !canvas?.width || !canvas?.height) return false;
+ const w = canvas.width;
+ const h = canvas.height;
+ const samples = [
+ [0.3, 0.35],
+ [0.5, 0.5],
+ [0.7, 0.35],
+ [0.35, 0.7],
+ [0.65, 0.7],
+ ];
+ const buf = new Uint8Array(4);
+ let first = null;
+ let same = 0;
+ for (const [fx, fy] of samples) {
+ const x = Math.min(w - 1, Math.max(0, Math.floor(w * fx)));
+ const y = Math.min(h - 1, Math.max(0, Math.floor(h * fy)));
+ gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+ const key = `${buf[0]},${buf[1]},${buf[2]}`;
+ if (first == null) first = key;
+ else if (key === first) same += 1;
+ }
+ // 4 of 5 remaining samples match the first → nearly uniform frame.
+ if (same >= 4) return true;
+ } catch (_) {
+ /* length heuristic already applied */
+ }
+ return false;
+ }
+
+ /**
+ * Render current camera into the drawing buffer and return a PNG data URL.
+ * Double-renders so lite/safer Safari has a settled frame before toDataURL.
+ * @returns {string}
+ */
+ _captureElevationFrame() {
+ this.controls.update();
+ this.renderer.render(this.scene, this.camera);
+ this.renderer.render(this.scene, this.camera);
+ try {
+ return this.renderer.domElement.toDataURL('image/png');
+ } catch (err) {
+ console.warn('[scene] elevation toDataURL failed', err);
+ return '';
+ }
+ }
+
+ /**
  * Capture clear elevation PNGs of all four sides (front/back/left/right).
  * Phone-safe: uses the live WebGL canvas via toDataURL at a capped size
  * (no 1920 download path). Restores camera + orbit afterward.
+ * Keys stay front/back/left/right (worker maps to Sidewall/Endwall filenames).
  *
  * @param {{ maxWidth?: number, maxHeight?: number }} [opts]
  * @returns {Promise<{ front?: string, back?: string, left?: string, right?: string }>}
- *   data URLs keyed by wall; empty object when WebGL is unavailable.
+ * data URLs keyed by wall; empty object when WebGL is unavailable.
  */
  async captureElevationShots(opts = {}) {
  const out = {};
@@ -1537,16 +1604,18 @@ export class SceneView {
 
  for (const side of sides) {
  this.camera.position.set(side.pos[0], side.pos[1], side.pos[2]);
- this.controls.update();
- this.renderer.render(this.scene, this.camera);
- // Prefer the WebGL drawing buffer (works on iPhone Safari lite).
- let dataUrl = '';
- try {
- dataUrl = this.renderer.domElement.toDataURL('image/png');
- } catch (err) {
- console.warn('[scene] elevation toDataURL failed', side.key, err);
+ let dataUrl = this._captureElevationFrame();
+ if (this._isBlankElevationDataUrl(dataUrl)) {
+ // One retry after a paint yield — iOS sometimes returns a cleared buffer.
+ await new Promise((r) => requestAnimationFrame(r));
+ this.camera.position.set(side.pos[0], side.pos[1], side.pos[2]);
+ dataUrl = this._captureElevationFrame();
  }
- if (dataUrl && dataUrl.startsWith('data:image')) {
+ if (dataUrl && dataUrl.startsWith('data:image') && !this._isBlankElevationDataUrl(dataUrl)) {
+ out[side.key] = dataUrl;
+ } else if (dataUrl && dataUrl.startsWith('data:image')) {
+ // Keep a non-empty URL even if still suspicious — delivery > perfect.
+ console.warn('[scene] elevation may be blank', side.key, dataUrl.length);
  out[side.key] = dataUrl;
  }
  // Yield so Safari can keep the page responsive between shots.

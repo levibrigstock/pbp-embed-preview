@@ -964,6 +964,14 @@ async function handoffLead(record, elevations = {}) {
     const elevationKeys = ['front', 'back', 'left', 'right'].filter(
       (k) => elevations && typeof elevations[k] === 'string' && elevations[k].startsWith('data:image'),
     );
+    // Delivery > perfect: still send the quote even if some elevations are missing/blank.
+    if (elevationKeys.length < 4) {
+      console.warn(
+        '[embed] fewer than 4 valid elevation PNGs; sending quote anyway',
+        elevationKeys.length,
+        elevationKeys,
+      );
+    }
     const payload = {
       ...record,
       elevations: Object.fromEntries(elevationKeys.map((k) => [k, elevations[k]])),

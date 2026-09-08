@@ -1838,7 +1838,7 @@ export class SceneView {
    * Returns solid panels { u0, u1, v0, v1 }.
    */
  _wallSolidPanels(wallLen, wallH, openings) {
- const gap = 0.06; // small clearance around rough opening
+ const gap = 0.02; // tight to casing — larger gaps showed daylight around trim
  let solids = [{ u0: 0, u1: wallLen, v0: 0, v1: wallH }];
 
  const holes = (openings || []).map((o) => {
@@ -2832,7 +2832,7 @@ export class SceneView {
  voidMesh.renderOrder = 18;
  g.add(voidMesh);
 
- // Brickmold / exterior casing
+ // Brickmold / exterior casing — overlaps into rough opening so no daylight gaps
  const caseCol = selected ? 0xf59e0b : trimHex;
  const caseMat = new THREE.MeshStandardMaterial({
  color: caseCol,
@@ -2841,22 +2841,28 @@ export class SceneView {
  emissive: selected ? 0x5c2a00 : 0x000000,
  emissiveIntensity: selected ? 0.25 : 0,
  });
- const caseT = 0.16;
+ const caseT = 0.22;
+ const caseOverlap = 0.06; // into the opening so jamb/head meet the door slab
  const caseD = 0.42;
- for (const sx of [-w / 2 - caseT / 2, w / 2 + caseT / 2]) {
- const j = new THREE.Mesh(new THREE.BoxGeometry(caseT, h + caseT * 2.2, caseD), caseMat);
- j.position.set(sx, 0, 0.08);
+ for (const side of [-1, 1]) {
+ const jW = caseT + caseOverlap;
+ const j = new THREE.Mesh(new THREE.BoxGeometry(jW, h + caseT * 2.2, caseD), caseMat);
+ j.position.set(side * (w / 2 + caseT / 2 - caseOverlap / 2), 0, 0.08);
  j.castShadow = true;
  g.add(j);
  }
- const head = new THREE.Mesh(new THREE.BoxGeometry(w + caseT * 2.2, caseT, caseD), caseMat);
- head.position.set(0, h / 2 + caseT / 2, 0.08);
- g.add(head);
- const sillP = new THREE.Mesh(
- new THREE.BoxGeometry(w + caseT * 2.4, caseT * 0.85, caseD + 0.08),
+ const headH = caseT + caseOverlap;
+ const head = new THREE.Mesh(
+ new THREE.BoxGeometry(w + caseT * 2.2, headH, caseD),
  caseMat,
  );
- sillP.position.set(0, -h / 2 - caseT * 0.4, 0.12);
+ head.position.set(0, h / 2 + caseT / 2 - caseOverlap / 2, 0.08);
+ g.add(head);
+ const sillP = new THREE.Mesh(
+ new THREE.BoxGeometry(w + caseT * 2.4, caseT * 0.9, caseD + 0.08),
+ caseMat,
+ );
+ sillP.position.set(0, -h / 2 - caseT * 0.35, 0.12);
  g.add(sillP);
 
  if (type === 'window') {
@@ -2902,7 +2908,7 @@ export class SceneView {
  metalness: 0.45,
  roughness: 0.4,
  });
- const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.9, h * 0.93, 0.12), doorSkin);
+ const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.985, h * 0.985, 0.12), doorSkin);
  door.position.z = 0.15;
  door.castShadow = true;
  g.add(door);
@@ -2950,7 +2956,7 @@ export class SceneView {
  roughness: 0.42,
  metalness: 0.4,
  });
- const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.94, h * 0.94, 0.14), doorMat);
+ const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.985, h * 0.985, 0.14), doorMat);
  door.position.z = 0.14;
  door.castShadow = true;
  g.add(door);
@@ -2961,7 +2967,7 @@ export class SceneView {
  const panels = 5;
  for (let i = 1; i < panels; i++) {
  const y = -h * 0.47 + (i / panels) * h * 0.94;
- const line = new THREE.Mesh(new THREE.BoxGeometry(w * 0.9, 0.05, 0.16), lineMat);
+ const line = new THREE.Mesh(new THREE.BoxGeometry(w * 0.96, 0.05, 0.16), lineMat);
  line.position.set(0, y, 0.2);
  g.add(line);
  }

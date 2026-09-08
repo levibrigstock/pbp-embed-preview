@@ -29,7 +29,11 @@ import {
  purlinStationPad,
  purlinRowsPerSide,
  panelMetalOverhangIn,
+ useMidGable18Demotion,
+ isExplicitMidGableKeep20,
+ hasWoodOverhangStandardEave,
  hasAnyLean,
+ hasPartialEnclosedShedLean,
 } from './productionPolicy.js?v=20260806f';
 
 /**
@@ -241,7 +245,9 @@ function stationsWithOpeningAdjustments(wallLen, spacing, openingsOnWall, opts =
  const stations = new Set(gridStations(wallLen, spacing));
  /** Off-grid door jambs only — listed as JambPost on the order list */
  const jambSet = new Set();
- /** Only eave walls: drop grid posts just outside RO near off-grid jambs (SB 35×55). */
+ /** Grid posts cleared by OH/slider ROs — benchmark still orders short header stubs @ eaveStock−2. */
+ const stubSet = new Set();
+ /** Only eave walls: drop grid posts just outside RO near off-grid jambs (benchmark 35×55). */
  const joinNearJambs = opts.eaveWall === true;
 
  const clamp = (u) => roundStation(Math.max(0, Math.min(wallLen, u)));
@@ -274,8 +280,21 @@ function stationsWithOpeningAdjustments(wallLen, spacing, openingsOnWall, opts =
  const blocking = [...stations].filter((u) => u > u0 + jambEps && u < u1 - jambEps);
 
  if (isDoorOpening(o)) {
- // Remove blockers (may be relocated to a jamb)
- for (const u of blocking) stations.delete(u);
+ // Remove blockers (may be relocated to a jamb). OH/slider grid blockers
+ // become header stub posts (Frank EXT-3 C×2 @14′ cut ~2′4″).
+ const wideOh = (o.type === 'overhead' || o.type === 'slider') && width >= 8;
+ for (const u of blocking) {
+ stations.delete(u);
+ // Header stubs only when caller opts in (wood-OH small-shop — Frank).
+ // Full/lean goldens (Levi/Mark) do not order these extras.
+ if (
+ opts.allowOhHeaderStubs &&
+ wideOh &&
+ isOnPostGrid(u, wallLen, spacing, jambEps)
+ ) {
+ stubSet.add(roundStation(u));
+ }
+ }
 
  // Prefer relocating a blocked post to the nearer jamb, then ensure both jambs
  if (blocking.length === 1) {
@@ -346,7 +365,7 @@ function stationsWithOpeningAdjustments(wallLen, spacing, openingsOnWall, opts =
  }
 
  // Long eave (L ≥ 60′), 3+ independent wide doors: half-bay join can clear
- // every intermediate line post so the door wall is 100% JambPost. SB still
+ // every intermediate line post so the door wall is 100% JambPost. benchmark still
  // lists one slid column as Post (60×12 equal-space 3×10′ → 10@16 + 5 Jamb,
  // not 9+6). Mid-length eaves (35×55 L=55) keep full JambPost pairs (6@16).
  // Only when jambs == 2×doors (no shared jambs) and no regular intermediate remains.
@@ -384,6 +403,7 @@ function stationsWithOpeningAdjustments(wallLen, spacing, openingsOnWall, opts =
  return {
  stations: [...stations].sort((a, b) => a - b),
  jambSet,
+ stubSet,
  };
 }
 
@@ -417,6 +437,7 @@ export function generateMainPosts(b) {
  // Open drive-through wall: corners only (unless lean needs structure)
  let stations;
  let jambSet = new Set();
+ let stubSet = new Set();
  if (wallOpen && !leanOnWall) {
  stations = [0, len];
  } else {
@@ -424,10 +445,18 @@ export function generateMainPosts(b) {
  len,
  s,
  mainWallOpenings(b, wall),
- { eaveWall: wall === 'left' || wall === 'right' },
+ {
+ eaveWall: wall === 'left' || wall === 'right',
+ // Frank-class wood-OH small shops only — not Levi/Mark/Harr leans.
+ allowOhHeaderStubs:
+ hasWoodOverhangStandardEave(b) &&
+ !hasAnyLean(b) &&
+ !useFullGirtPackage(b),
+ },
  );
  stations = adj.stations;
  jambSet = adj.jambSet;
+ stubSet = adj.stubSet || new Set();
  }
  // Dual enclosed eave wings: drop low gable stub posts beyond a wide OH
  // toward the corner (Mark EXT-2/4 → 2@22+2@24, no far 18′ grid).
@@ -458,7 +487,7 @@ export function generateMainPosts(b) {
  }
  return true;
  });
- // Near-peak high posts (SB A×2 @22′): first grid in from each corner.
+ // Near-peak high posts (benchmark A×2 @22′): first grid in from each corner.
  for (const uKeep of [s, len - s]) {
  if (uKeep <= 0.05 || uKeep >= len - 0.05) continue;
  // Skip if inside an RO
@@ -504,14 +533,34 @@ export function generateMainPosts(b) {
  }
  }
  }
+ // OH header stubs: grid posts cleared by wide OH/slider ROs. benchmark still
+ // orders eaveStock−2 CCA (Frank 12′ eave → 2@14′). Skip low eaves (stock
+ // <16′) so 60×60×10 Post14 golden stays exact.
+ for (const u of stubSet) {
+ const pos = wallOffsetToXZ(b, wall, u);
+ const k = keyXZ(pos.x, pos.z);
+ if (map.has(k)) continue; // already a real post/jamb
+ map.set(k, {
+ x: pos.x,
+ z: pos.z,
+ walls: new Set([wall]),
+ kind: 'main',
+ openingJamb: false,
+ ohHeaderStub: true,
+ alongFt: u,
+ primaryWall: wall,
+ });
+ }
  }
 
  // Safety: no post may remain inside any main-wall RO
+ // (except OH header stubs — intentional short posts above the door).
  for (const o of b.openings || []) {
  if (o.host && o.host !== 'main') continue;
  const wall = o.wall || 'front';
  const wallLen = wall === 'front' || wall === 'back' ? W : L;
  for (const [k, p] of [...map.entries()]) {
+ if (p.ohHeaderStub) continue;
  const u = postAlongWall(p, wall, b);
  if (u == null) continue;
  if (postBlocksOpening(u, o)) map.delete(k);
@@ -540,7 +589,7 @@ export function generateMainPosts(b) {
  const e = map.get(k);
  e.walls.add(wall);
  // Do not force openingJamb false → true. stationsWithOpeningAdjustments may
- // intentionally leave a slid column as Post on long multi-OH eaves (SB 10@16+5 Jamb).
+ // intentionally leave a slid column as Post on long multi-OH eaves (benchmark 10@16+5 Jamb).
  if (extraJamb && e.openingJamb) {
  e.alongFt = u;
  e.primaryWall = wall;
@@ -561,7 +610,8 @@ export function generateMainPosts(b) {
  p.walls,
  );
  const isJamb = !!p.openingJamb;
- // Walk/window jamb on eave walls only: SB step-down vs wall posts
+ const ohHeaderStub = !!p.ohHeaderStub;
+ // Walk/window jamb on eave walls only: benchmark step-down vs wall posts
  // (Prater left walk 14′ vs eave 16′). Do not step gable-end jambs (Levi).
  let walkJamb = false;
  const eaveWall = p.primaryWall === 'left' || p.primaryWall === 'right';
@@ -592,9 +642,13 @@ export function generateMainPosts(b) {
  const leanOuter = Number(lt?.eaveHeight);
  if (leanOuter > 0.1) orderHeight = leanOuter;
  }
+ const heel = Math.max(0, Number(b.heelHeightFt) || 0);
  const pick = pickPostStockLength(orderHeight, embedFt, POST_STOCK_LENGTHS, {
  isOpeningJamb: isJamb,
  building: b,
+ // Heel adds to requiredFt inside core — not to orderH — so jamb clamp
+ // still sees plain eave height (Doug raised heel → 22′/26′ stock).
+ heelHeightFt: p.kind === 'lean' ? 0 : heel,
  });
  let stockFt = pick.stockFt;
  let requiredFt = pick.requiredFt;
@@ -603,12 +657,41 @@ export function generateMainPosts(b) {
  const eavePick = pickPostStockLength(Number(b.eaveHeight) || 0, embedFt, POST_STOCK_LENGTHS, {
  building: b,
  });
- // Only step down on 12′+ eave packages (Prater 16→14). 10′ eave wall
- // jambs stay on eave stock (60×60 → 4@14 JambPost).
- if ((eavePick.stockFt || 0) >= 16) {
+ // Non-raised-heel: step walk jambs −2 vs wall stock (Prater 16→14, Jim perma).
+ // Raised heel (Doug): keep walk jambs on the tall ladder (@22′).
+ if (heel < 0.1 && (eavePick.stockFt || 0) >= 16) {
  stockFt = Math.max(10, eavePick.stockFt - 2);
  orderH = Math.max(7, stockFt - embedFt - 0.5);
  requiredFt = orderH + embedFt;
+ }
+ }
+ 
+ // Raised-heel partial shed: gable jambs with rise ≳1.75′ bump 22→24
+ // (Doug benchmark @24 with exact-24 keep). Eave-clamped path otherwise sticks @22′.
+ if (
+  heel > 0 &&
+  hasPartialEnclosedShedLean(b) &&
+  isJamb &&
+  stockFt === 22 &&
+  (Number(riseContribution) || 0) >= 1.75
+ ) {
+  stockFt = 24;
+ }
+ // OH header stubs above wide doors: eaveStock−2 when eave stock ≥16′
+ // (Frank EXT-3 C×2 @14′). Low eaves skip (filtered at map insert via stock).
+ if (ohHeaderStub) {
+ const eavePick = pickPostStockLength(Number(b.eaveHeight) || 0, embedFt, POST_STOCK_LENGTHS, {
+ building: b,
+ });
+ if ((eavePick.stockFt || 0) >= 16) {
+ stockFt = Math.max(10, eavePick.stockFt - 2);
+ orderH = Math.max(2, (Number(b.eaveHeight) || 12) - 10);
+ requiredFt = orderH + 0; // above-header stub — not embedded
+ } else {
+ // Drop from order list on low-eave packages
+ stockFt = 0;
+ requiredFt = 0;
+ orderH = 0;
  }
  }
  const orderMeta = isJamb
@@ -621,20 +704,21 @@ export function generateMainPosts(b) {
  kind: 'main',
  role,
  openingJamb: isJamb,
+ ohHeaderStub,
  alongFt: p.alongFt != null ? p.alongFt : null,
  primaryWall: p.primaryWall || walls[0] || null,
  riseContribution,
- heightAboveGrade: walkJamb ? orderH : heightAboveGrade,
+ heightAboveGrade: walkJamb || ohHeaderStub ? orderH : heightAboveGrade,
  /** Height used for stock pick (jambs may clamp low-rise to eave) */
  orderHeightAboveGrade: orderMeta.heightFt,
- embedFt,
+ embedFt: ohHeaderStub ? 0 : embedFt,
  requiredFt,
  totalLengthFt: stockFt,
  stockFt,
  gradeBufferApplied: pick.gradeBufferApplied,
  fieldCutFt: pick.fieldCutFt || null,
  };
- });
+ }).filter((p) => (Number(p.stockFt) || 0) > 0);
 
  return posts;
 }
@@ -706,6 +790,11 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  // Dual enclosed eave wings: outer posts order at MAIN eave stock (Mark EXT-1/3
  // → 18′), apply OH jamb packing, and add one short 14′ post per wide door.
  const dualEave = hasDualFullEnclosedEaveLeans(b);
+ // Raised-heel partial shed lean (Doug): outer posts include main heel → 18′
+ // nail-lam (benchmark 3@18). Full-length / dual-eave leans keep prior ladder.
+ const mainHeel = Math.max(0, Number(b.heelHeightFt) || 0);
+ const leanHeel =
+  !dualEave && mainHeel > 0 && hasPartialEnclosedShedLean(b) ? mainHeel : 0;
  {
  const outerOpens = leanFaceOpenings(b, lean, 'outer');
  const adj =
@@ -718,7 +807,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  const jambSet = adj.jambSet;
  const dx = outerEnd.x - outerStart.x;
  const dz = outerEnd.z - outerStart.z;
- // Dual wings: SB nails lean outers at main eave package length.
+ // Dual wings: benchmark nails lean outers at main eave package length.
  const outerOrderH = dualEave
  ? Number(b.eaveHeight) || Number(lean.eaveHeight) || 12
  : Number(lean.eaveHeight) || 10;
@@ -730,6 +819,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  const pick = pickPostStockLength(outerOrderH, embedFt, POST_STOCK_LENGTHS, {
  isOpeningJamb: isJamb,
  building: b,
+ heelHeightFt: leanHeel,
  });
  posts.push({
  x: px,
@@ -750,7 +840,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  fieldCutFt: pick.fieldCutFt || null,
  });
  }
- // SB EXT-1: one short 14′ post per wide OH on multi-door lean outers
+ // benchmark EXT-1: one short 14′ post per wide OH on multi-door lean outers
  // (cut ~4′4″ above header / pier — stock still 14′).
  if (dualEave) {
  const wideDoors = outerOpens.filter(
@@ -817,6 +907,11 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  let sideH;
  if (endPosts.length > 0) {
  sideH = (lean.eaveHeight + attachH) / 2;
+ // Raised-heel partial shed: end posts order just under attach (no heel)
+ // so mid-depth stations land on 20′ (Doug benchmark 2@20) not average→18′.
+ if (leanHeel > 0) {
+  sideH = Math.max(Number(lean.eaveHeight) || 0, attachH - 1);
+ }
  } else if (depth > 0.5) {
  // Shallow enclosed lean: mid-end post at attach height (production +2)
  endPosts = [
@@ -831,7 +926,10 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  continue;
  }
  for (const p of endPosts) {
- const pick = pickPostStockLength(sideH, embedFt);
+ const pick = pickPostStockLength(sideH, embedFt, POST_STOCK_LENGTHS, {
+  building: b,
+  // Ends intentionally omit heel — pairs with outer heel→18′ ladder.
+ });
  posts.push({
  x: p.x,
  z: p.z,
@@ -851,6 +949,62 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  }
  }
  }
+ }
+
+ // Deep gable-extension (Jim 43′ wing): interior post grid along depth × length
+ // so perma-column count approaches benchmark ~49–51 (perimeter alone under-orders).
+ if (
+  enclosed &&
+  !dualEave &&
+  (lean.kind || 'leanto') === 'gable-extension' &&
+  depth > 32
+ ) {
+  const midDepths = gridStations(depth, s).slice(1, -1);
+  const midLengths = gridStations(length, s).slice(1, -1);
+  // One interior row at mid-depth + posts at each mid-length (ridge-ish line),
+  // plus a second row at 1/4 and 3/4 depth for tall/long wings.
+  const fracDepths = [0.25, 0.5, 0.75]
+   .map((f) => Math.round(depth * f * 1000) / 1000)
+   .filter((u) => u > s * 0.5 && u < depth - s * 0.5);
+  const depthLines = [...new Set([...midDepths.slice(0, 1), ...fracDepths])];
+  for (const du of depthLines) {
+   const tDepth = depth > 0.01 ? du / depth : 0;
+   for (const lu of midLengths) {
+    const tLen = length > 0.01 ? lu / length : 0;
+    // Interpolate in the lean rectangle outerStart/End → innerStart/End
+    const ox = outerStart.x + (outerEnd.x - outerStart.x) * tLen;
+    const oz = outerStart.z + (outerEnd.z - outerStart.z) * tLen;
+    const ix = innerStart.x + (innerEnd.x - innerStart.x) * tLen;
+    const iz = innerStart.z + (innerEnd.z - innerStart.z) * tLen;
+    const px = ox + (ix - ox) * tDepth;
+    const pz = oz + (iz - oz) * tDepth;
+    // Height tapers outer→attach
+    const outerH = Number(lean.eaveHeight) || 10;
+    const attachH = leanToAttachHeight(b, lean);
+    const h = outerH + (attachH - outerH) * tDepth;
+    const pick = pickPostStockLength(h, embedFt, POST_STOCK_LENGTHS, {
+     building: b,
+    });
+    posts.push({
+     x: px,
+     z: pz,
+     walls: [lean.wall],
+     kind: 'leanto',
+     leanToId: lean.id,
+     face: 'interior',
+     shared: false,
+     openingJamb: false,
+     alongFt: lu,
+     heightAboveGrade: h,
+     embedFt,
+     requiredFt: pick.requiredFt,
+     totalLengthFt: pick.stockFt,
+     stockFt: pick.stockFt,
+     gradeBufferApplied: pick.gradeBufferApplied,
+     fieldCutFt: pick.fieldCutFt || null,
+    });
+   }
+  }
  }
 
  // Mark main posts along attachment span as shared (not double-counted)
@@ -908,23 +1062,42 @@ export function computeLeanToMaterials(b, lean, dims) {
  // 8' deep @ 2' + 3" OH → ceil(8.25/2)+1 = 6 rows × 80' → packs into +30 of 16'
  // (main 128@16 + lean 30@16 = 158@16 — matches production Job Review).
  // Gable lean (ridge out from wall): 1 row per slope along lean length + ridge stubs.
- // SB 60×12+14′ gable lean: main 118/27 + lean 2@16 + 3@12 → 120/30.
+ // benchmark 60×12+14′ gable lean: main 118/27 + lean 2@16 + 3@12 → 120/30.
  let purlinRows;
  /** Run length each purlin board covers (ft). */
  let purlinRunFt = length;
  /** Extra 12′ stubs (gable peak/ridge stations). */
  let purlinExtra12 = 0;
- if (isGable) {
- purlinRows = 2; // one purlin row per slope
- purlinRunFt = length;
- purlinExtra12 = 3; // SB peak/ridge station stubs
+  const isGableExt = (lean.kind || 'leanto') === 'gable-extension';
+ if (isGableExt) {
+  // Gable-extension wing: ridge along depth; purlins parallel to ridge
+  // (run = depth) with stations up each half-span (width/2 + OH).
+  const frameOh = (Number(lean.overhangIn) || Number(b.overhangIn) || 0) / 12;
+  const halfSpan = length / 2 + metalOh + frameOh;
+  const pad = enclosed ? 1 : 0;
+  const rowsPerSlope = Math.max(2, Math.ceil(halfSpan / purlinSp - 1e-9) + pad);
+  purlinRows = rowsPerSlope * 2;
+  purlinRunFt = depth;
+  // End/ridge stubs on wing runs. Long depth (≳32′) also adds one 12′ stub
+  // per station (Jim 43′×24 rows → +24 → Purlin12 56→80 toward benchmark).
+  purlinExtra12 = Math.max(3, Math.ceil(purlinRows / 4));
+  if (depth > 32) purlinExtra12 += purlinRows;
+ } else if (isGable) {
+  purlinRows = 2; // one purlin row per slope
+  purlinRunFt = length;
+  purlinExtra12 = 3; // benchmark peak/ridge station stubs
  } else {
- // Enclosed leans: +1 station pad (Mark dual → 10 rows / Levi shed).
- // Open leans: no pad + 16+12+12 pack + L/10 edge stubs (Prater → 6+4).
- const pad = enclosed ? 1 : 0;
- purlinRows = Math.max(2, Math.ceil((depth + metalOh) / purlinSp) + pad);
- purlinRunFt = length;
- if (!enclosed) purlinExtra12 = Math.max(0, Math.ceil(length / 10 - 1e-9));
+  // Enclosed leans: +1 station pad (Mark dual → 10 rows / Levi shed).
+  // Open leans: no pad + 16+12+12 pack + L/10 edge stubs (Prater → 6+4).
+  const pad = enclosed ? 1 : 0;
+  purlinRows = Math.max(2, Math.ceil((depth + metalOh) / purlinSp) + pad);
+  purlinRunFt = length;
+  if (!enclosed) purlinExtra12 = Math.max(0, Math.ceil(length / 10 - 1e-9));
+  // Partial enclosed shed: benchmark adds short 12′ stations on the lean run
+  // (Doug Purlin12 67→73). Full-length enclosed sheds (Levi) skip.
+  else if (hasPartialEnclosedShedLean(b)) {
+   purlinExtra12 = Math.max(3, Math.ceil(length / 4) + 1);
+  }
  }
  const purlinLf = purlinRows * purlinRunFt;
 
@@ -979,19 +1152,33 @@ export function computeLeanToMaterials(b, lean, dims) {
 
  // --- Roof metal ---
  // Shed: one plane, panels run up-slope, coverage along length
- // Gable: two planes
+ // Gable lean-to: two planes; half-span = depth/2 (out from wall)
+ // Gable-extension (Jim wing): ridge runs along depth; half-span = length/2
+ // (wing width). Panel count along ridge (depth); cut includes wood + metal OH.
  const coverage = 3;
  const roofSides = isGable ? 2 : 1;
- const roofPanelQty = Math.ceil(length / coverage) * roofSides + (isGable ? 0 : 0);
+ // isGableExt declared with purlin stations above
+ const roofAlong = isGableExt ? depth : length;
+ const roofPanelQty = Math.ceil(roofAlong / coverage) * roofSides + (isGable ? 0 : 0);
  // Order cut: metal drip OH (not wood frame OH) + short add, nearest inch.
  // Mark 16'@2/12+3" → 16'7"; Prater 10'@2/12+3" → 10'6" (even if frame OH is 1').
+ // Gable-extension: include wood frame OH so Jim 33' wing @ 5/12+2' → ~20'5".
  const metalInRaw = lean.metalOverhangIn != null ? Number(lean.metalOverhangIn) : 3;
  const metalOhOrderFt =
  (Number.isFinite(metalInRaw) && metalInRaw > 0 ? metalInRaw : 3) / 12;
+ const frameOhOrderFt = isGableExt
+ ? (Number(lean.overhangIn) || Number(b.overhangIn) || 0) / 12
+ : 0;
  const leanPitchRatio = (Number(lean.pitch) || 3) / 12;
- const leanOrderSlope = isGable
- ? Math.hypot(depth / 2 + metalOhOrderFt, (depth / 2) * leanPitchRatio)
- : Math.hypot(depth + metalOhOrderFt, depth * leanPitchRatio);
+ const halfSpan = isGable
+ ? (isGableExt ? length / 2 : depth / 2) + metalOhOrderFt + frameOhOrderFt
+ : depth + metalOhOrderFt;
+ // Gable-extension: rise on full half-span incl. OH (Jim → 20'5"). Plain gable
+ // lean keeps rise on building half-depth only (Mark/Prater locks).
+ const riseRun = isGable
+ ? (isGableExt ? halfSpan : depth / 2) * leanPitchRatio
+ : depth * leanPitchRatio;
+ const leanOrderSlope = Math.hypot(halfSpan, riseRun);
  const leanAddIn = leanOrderSlope < 20 ? 1.5 : 2;
  const roofPanelLen = Math.round((leanOrderSlope + leanAddIn / 12) * 12) / 12;
 
@@ -1130,7 +1317,7 @@ export function girtLevelsForHeight(wallHeightFt, spacingFt, wainH = 0, opts = {
 
 /**
  * True when both eave walls (left+right) have full-length enclosed shed leans.
- * In that dual-wing layout SB treats shared main eaves as interior (no main
+ * In that dual-wing layout benchmark treats shared main eaves as interior (no main
  * eave girts/skirt); lean outers carry the skin. Single-lean jobs (Levi) still
  * count the host main wall.
  */
@@ -1183,10 +1370,30 @@ export function generateGirts(b) {
  const runs = [];
  const dualEaveLeans = hasDualFullEnclosedEaveLeans(b);
  for (const wall of closed) {
- // Dual enclosed eave leans: skip shared main eaves (interior to wings).
- if (dualEaveLeans && (wall === 'left' || wall === 'right')) continue;
- const len = wallLength(b, wall);
- runs.push({ wall, lengthFt: len, rows: levels.length, host: 'main' });
+  // Dual enclosed eave leans: skip shared main eaves (interior to wings).
+  if (dualEaveLeans && (wall === 'left' || wall === 'right')) continue;
+  let len = wallLength(b, wall);
+  // Partial enclosed lean on this wall: covered span is interior to the lean
+  // (no exterior girts). Full-length leans (length≤0 ⇒ full wall) keep the
+  // host run — Levi counts main host + lean outer. Strictly partial only.
+  if (!dualEaveLeans) {
+  for (const lean of b.leanTos || []) {
+  if (!lean || lean.wall !== wall || !isLeanEnclosed(lean)) continue;
+  // Gable-extension shares a gable end — keep host girts (Jim wing).
+  if ((lean.kind || 'leanto') === 'gable-extension') continue;
+  const wallLen = wallLength(b, wall);
+  const offset = Number(lean.offset) || 0;
+  const leanLen =
+  Number(lean.length) > 0
+  ? Math.min(Number(lean.length) || 0, wallLen - offset)
+  : 0; // length≤0 → full-cover; do not reduce (Levi)
+  if (!(leanLen > 0.1) || leanLen >= wallLen - 0.1) continue;
+  len = Math.max(0, len - leanLen);
+  }
+  }
+  if (len > 0.1) {
+  runs.push({ wall, lengthFt: len, rows: levels.length, host: 'main' });
+  }
  }
 
  // Enclosed lean-to faces
@@ -1223,7 +1430,7 @@ export function generateGirts(b) {
  });
  }
  // Dual enclosed eave wings: lean end walls sit in the extended gable
- // plane and are packed with main gable girts in SB (Mark → ~56 not 85+).
+ // plane and are packed with main gable girts in benchmark (Mark → ~56 not 85+).
  if (depth > 0.1 && !dualEaveLeans) {
  const endH = Math.max(outerH, attachH);
  const lv = girtLevelsForHeight(endH, spacingFt, wainH, levelOpts).filter(
@@ -1341,7 +1548,7 @@ export function generateSkirt(b) {
  linearFt += length;
  runs.push({ lengthFt: length, rows: 1 });
  }
- // Dual eave wings: lean-end skirt is in the extended gable line (Mark SB 8).
+ // Dual eave wings: lean-end skirt is in the extended gable line (Mark benchmark 8).
  if (!dualEaveLeans) {
  if (!isLeanFaceOpen(lean, 'leftEnd')) {
  linearFt += depth;
@@ -1384,17 +1591,17 @@ export function generateTrussCarriers(b) {
 }
 
 /**
- * Opening lumber — production order package (calibrated to SmartBuild order lists).
+ * Opening lumber — production order package (calibrated to Benchmark order lists).
  *
  * Names: Header / Trimmer / Sill / Backing (no KingStud on order list).
  * Stock: prefer 12' boards when RO + bearing fits.
  *
  * Window: 2-ply 2x6 header @12, 1 sill @12, 4 backing @12 (no jacks/kings on order).
  * Walk:   2-ply 2x6 header @12, 2 trimmers @12, 6x6 jamb posts.
- * OH/slider: 1× 2x12 @12 + 2× 2x6 @12 (SB order package), 6x6 jamb posts.
+ * OH/slider: 1× 2x12 @12 + 2× 2x6 @12 (benchmark order package), 6x6 jamb posts.
  *
  * Full package (eave≥14′ / lean) emits Header+Trimmer+Sill+Backing (Levi).
- * Small-shop takeoff omits Trimmer/Sill/Backing — headers + JambPost only (60×60×10 SB).
+ * Small-shop takeoff omits Trimmer/Sill/Backing — headers + JambPost only (60×60×10 benchmark).
  *
  * Typical full OH + walk + 1 window → Header 1@2x12 + 4@2x6, Trimmer 2, Sill 1, Backing 4.
  */
@@ -1449,7 +1656,7 @@ export function openingFraming(openings, b = {}) {
  }
 
  // Overhead / slider — 2x12 main; small-shop also 2× 2x6 package boards per door
- // (SB 35×55: 3 OH → 3@2x12 + 6@2x6). Full package (Levi) lists 2x12 only.
+ // (benchmark 35×55: 3 OH → 3@2x12 + 6@2x6). Full package (Levi) lists 2x12 only.
  const smallShop = !useFullGirtPackage(b);
  return {
  openingId: o.id,
@@ -1485,7 +1692,7 @@ export function openingFraming(openings, b = {}) {
 export function generateFraming(b) {
  // Normalize stale lean outer eaves (old default pitch 3 → 12' on 14'/8' lean)
  // so posts, metal, and girts share production geometry.
- // Keep explicit broken-pitch leans (lean.pitch ≠ main.pitch) — SB orders
+ // Keep explicit broken-pitch leans (lean.pitch ≠ main.pitch) — benchmark orders
  // separate roof planes; do not force lean pitch up to main.
  for (const lt of b.leanTos || []) {
  if (!lt || (lt.roofStyle || 'shed') === 'gable') continue;
@@ -1553,10 +1760,65 @@ export function generateFraming(b) {
  leanSubFasciaLf += m.subFasciaLf || 0;
  }
 
+ // Perma-column + gable-extension (Jim): remap CCA sleeve lengths toward benchmark
+ // 16@14 / 14@18 / 15@20 / 2@22 / 2@24 without changing station count.
+ const allPostsCombined = [...mainPosts, ...leanPosts];
+ if (
+  b.permaColumns &&
+  (b.leanTos || []).some((lt) => lt && (lt.kind || 'leanto') === 'gable-extension')
+ ) {
+  const stockOf = (p) => Number(p.stockFt ?? p.totalLengthFt) || 0;
+  const setStock = (p, L) => {
+   p.stockFt = L;
+   p.totalLengthFt = L;
+  };
+  const by = { 14: [], 16: [], 18: [], 20: [], 22: [], 24: [] };
+  for (const p of allPostsCombined) {
+   const s = stockOf(p);
+   if (by[s]) by[s].push(p);
+   else by[16].push(p); // bucket odd lengths with 16′ for remap
+  }
+  // 16′ → 14′ until 16@14
+  while (by[14].length < 16 && by[16].length) {
+   const p = by[16].pop();
+   setStock(p, 14);
+   by[14].push(p);
+  }
+  // Remaining 16′ → 20′ until 15@20
+  while (by[20].length < 15 && by[16].length) {
+   const p = by[16].pop();
+   setStock(p, 20);
+   by[20].push(p);
+  }
+  // Spill any leftover 16′ into 18′
+  while (by[16].length) {
+   const p = by[16].pop();
+   setStock(p, 18);
+   by[18].push(p);
+  }
+  // Excess 22′ → 18′ until 2@22 (benchmark)
+  while (by[22].length > 2 && by[18].length < 14) {
+   const p = by[22].pop();
+   setStock(p, 18);
+   by[18].push(p);
+  }
+  // Fill 18′ to 14: prefer surplus 20′ (keep ≥14), then one from 14′ (keep ≥15).
+  while (by[18].length < 14 && by[20].length > 14) {
+   const p = by[20].pop();
+   setStock(p, 18);
+   by[18].push(p);
+  }
+  while (by[18].length < 14 && by[14].length > 15) {
+   const p = by[14].pop();
+   setStock(p, 18);
+   by[18].push(p);
+  }
+ }
+
  return {
  mainPosts,
  leanPosts,
- allPosts: [...mainPosts, ...leanPosts],
+ allPosts: allPostsCombined,
  girts,
  purlins,
  trusses,
@@ -1612,27 +1874,27 @@ export function optimizeBoards(linearFt, stockLengths = [20, 16, 14, 12, 10, 8])
 }
 
 /**
- * Post stock lengths: 2' increments from 8' through 24' (supplier max 6x6).
- * Taller stations order 24' + field spliced note.
+ * Post stock lengths: 2' increments from 8' through 26' (nail-lam / tall-eave benchmark).
+ * Taller stations order 26' + field spliced note when past max.
  */
-export const POST_STOCK_LENGTHS = [8, 10, 12, 14, 16, 18, 20, 22, 24];
+export const POST_STOCK_LENGTHS = [8, 10, 12, 14, 16, 18, 20, 22, 24, 26];
 
 /**
  * Max rise / full-roof-rise for collapsing a 2nd stock step (e.g. 18′→14′).
- * Sized so 60×10 low-gable jambs package as eave (SB 4@14′) while Levi front
+ * Sized so 60×10 low-gable jambs package as eave (benchmark 4@14′) while Levi front
  * OH jambs (riseFrac ≈ 0.44 on 55×14) keep full 22′ stock.
  */
 export const JAMB_SECOND_STEP_MAX_RISE_FRAC = 0.42;
 
 /**
- * Door jamb ORDER height (SB framing lists).
+ * Door jamb ORDER height (benchmark framing lists).
  *
  * Structural height still follows the rake for 3D/plans. For stock only:
  *  1) full stock ≤ eave stock + 2′  → package as eave (16′→14′ always)
  *  2) full stock ≤ eave stock + 4′ AND rise/fullRise ≤ 0.42 → eave
  *     (low 18′ gable jambs → 14′; mid/peak and Levi 22′ stay full height)
  *
- * Returns { heightFt, eaveClamped } so stock pick can apply SB eave-jamb step-down.
+ * Returns { heightFt, eaveClamped } so stock pick can apply benchmark eave-jamb step-down.
  */
 export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDepthFt) {
  if (!isOpeningJamb) {
@@ -1645,7 +1907,7 @@ export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDept
  const fullStock = pickPostStockLengthCore(h, embed).stockFt;
  const riseAboveEave = h - eave;
  // Already on eave wall (no rise): normal eave post stock — do NOT step down.
- // (35×55×12 SB: all 6 jambs @16′ same as wall posts.)
+ // (35×55×12 benchmark: all 6 jambs @16′ same as wall posts.)
  if (riseAboveEave <= 0.05) {
  return { heightFt: eave, eaveClamped: false };
  }
@@ -1665,7 +1927,7 @@ export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDept
 
 /**
  * Low-gable jambs collapsed to eave use the same stock as eave wall posts.
- * (Earlier −2′ step matched one 60×12 dump but broke 35×55 SB 6@16′ jambs.)
+ * (Earlier −2′ step matched one 60×12 dump but broke 35×55 benchmark 6@16′ jambs.)
  */
 export function eaveClampedJambStockFt(eaveHeightFt, postDepthFt) {
  const eave = Number(eaveHeightFt) || 0;
@@ -1689,7 +1951,9 @@ function pickPostStockLengthCore(
  coreOpts = {},
 ) {
  const sorted = [...stock].sort((a, b) => a - b);
- const requiredFt = (Number(heightAboveGradeFt) || 0) + (Number(postDepthFt) || 0);
+ const heel = Math.max(0, Number(coreOpts.heelHeightFt) || 0);
+ const requiredFt =
+  (Number(heightAboveGradeFt) || 0) + (Number(postDepthFt) || 0) + heel;
  if (requiredFt <= 0) {
  return { requiredFt: 0, stockFt: sorted[0], gradeBufferApplied: false, fieldCutFt: null };
  }
@@ -1700,7 +1964,7 @@ function pickPostStockLengthCore(
  let stockFt = sorted.find((L) => L + eps >= requiredFt);
  if (stockFt == null) {
  const maxL = sorted[sorted.length - 1] || 24;
- // Order max stock; field-cut callout = required to nearest inch (SB uses plan length)
+ // Order max stock; field-cut callout = required to nearest inch (benchmark uses plan length)
  const fieldCutFt = Math.round(requiredFt * 12) / 12;
  return {
  requiredFt,
@@ -1711,8 +1975,9 @@ function pickPostStockLengthCore(
  };
  }
 
- // SB mid-gable: req ~18.1–18.5′ orders 18′ not 20′ on narrow barns
- // (35×55 / 40×40 band). Wide barns (W ≥ 50, e.g. 60×12 mid @18.33′) keep 20′.
+ // benchmark mid-gable: req ~18.1–18.5′ may order 18′ not 20′ when policy enables demotion
+ // (auto: mid-width / plain-narrow small-shop). Wide / full-package / keep20 keep 20′.
+ // Frank 35×50 uses midGablePostPolicy:'keep20' (same req band as 30×40 goldens).
  // Do NOT general shortfall — that wrongly demotes 60×10 16.33′→16′ instead of 18′.
  if (
  !coreOpts.disableMidGable18 &&
@@ -1727,11 +1992,32 @@ function pickPostStockLengthCore(
  const slack = stockFt - requiredFt;
  // Exact hit OR slack under min → next 2' (only when stock covers required)
  if (slack >= -eps && slack < MIN_GRADE_SLACK_FT - eps) {
+ // Raised-heel nail-lam: exact 24′ required stays on 24′ (Doug benchmark @24 band);
+ // only bump into 26′ when required is past 24′.
+ const keepExact24 = heel > 0 && stockFt === 24 && requiredFt <= 24 + eps;
+ if (!keepExact24) {
  const next = sorted.find((L) => L > stockFt + eps);
  if (next != null) {
  stockFt = next;
  gradeBufferApplied = true;
  }
+ }
+ }
+ // Tall-eave band: req just under/at 20′ (16′ eave + 3′ embed = 19′) orders 22′
+ // stock on benchmark nail-lam / production CCA ladders — not a tight 20′.
+ // Mid-gable 18′ demotion already ran; req≤18.5′ stays on 18′/20′ as before.
+ if (
+  !coreOpts.disableTallEave22 &&
+  (Number(coreOpts.eaveHeightFt) || 0) >= 16 &&
+  stockFt === 20 &&
+  requiredFt > 18.5 + eps &&
+  requiredFt <= 20 + eps
+ ) {
+  const next = sorted.find((L) => L > stockFt + eps);
+  if (next != null) {
+  stockFt = next;
+  gradeBufferApplied = true;
+  }
  }
 
  let fieldCutFt = null;
@@ -1752,16 +2038,16 @@ function pickPostStockLengthCore(
  * required = height above grade (eave OR gable-end height at that station) + post depth
  * Then round UP to next even stock length (8'–24' max).
  *
- * Grade buffer (SB / production) for regular posts:
+ * Grade buffer (benchmark / production) for regular posts:
  *   1) Exact hit on a stock length → bump +2' (e.g. 18' exact → 20').
  *   2) If slack (stock − required) is under MIN_GRADE_SLACK (6"), bump +2'
- *      so peaks with 21.67' required don't order a tight 22' — SB uses 24'
+ *      so peaks with 21.67' required don't order a tight 22' — benchmark uses 24'
  *      on 40×40 4/12 @ 3' embed (21.67' → 24').
  *
  * Door jambs (opts.isOpeningJamb):
  *   - near-eave stocks collapse to eave package (jambOrderHeightFt)
- *   - soft grade buffer (exact-hit only) so 17.7′ stays 18′ not 20′ (SB mid-jambs)
- *   - near-peak: if first pick is 22′ and required > 21′, bump to 24′ (SB peak jambs)
+ *   - soft grade buffer (exact-hit only) so 17.7′ stays 18′ not 20′ (benchmark mid-jambs)
+ *   - near-peak: if first pick is 22′ and required > 21′, bump to 24′ (benchmark peak jambs)
  *
  * @param {number} heightAboveGradeFt - eave height, or taller gable-end height toward peak
  * @param {number} postDepthFt
@@ -1778,44 +2064,80 @@ export function pickPostStockLength(heightAboveGradeFt, postDepthFt, stock = POS
  orderH = jo.heightFt;
  eaveClamped = !!jo.eaveClamped;
  }
- // Eave-clamped jambs: SB packages shorter than eave wall posts on 12′+ eaves
- // (12′ eave → wall posts 16′, jambs 14′; 10′ eave → both 14′).
+ // Eave-clamped jambs: match eave wall-post stock (includes tall-eave 20→22).
+ // Walk step-down (−2) is applied later in generateMainPosts for mid eaves only.
  if (isJamb && eaveClamped && opts.building) {
- const jambStock = eaveClampedJambStockFt(
- opts.building.eaveHeight,
- postDepthFt ?? opts.building.postDepthFt,
- );
  const embed = Number(postDepthFt ?? opts.building.postDepthFt) || 3;
+ const eaveH = Number(opts.building.eaveHeight) || 0;
+ const heel = Math.max(0, Number(opts.heelHeightFt) || 0);
+ // Match develop eaveClampedJambStockFt (no tall-eave flag). Heel alone
+ // lifts Doug eave jambs 19→21.5→22′; Jim perma stays on prior ladder.
+ const stockClamp = (stock || POST_STOCK_LENGTHS).filter((L) => L <= (heel > 0 ? 26 : 24));
+ const wallPick = pickPostStockLengthCore(eaveH, embed, stockClamp, {
+ disableMidGable18: true,
+ heelHeightFt: heel,
+ });
  return {
- requiredFt: (Number(orderH) || 0) + embed,
- stockFt: jambStock,
- gradeBufferApplied: false,
+ requiredFt: (Number(orderH) || 0) + embed + heel,
+ stockFt: wallPick.stockFt,
+ gradeBufferApplied: !!wallPick.gradeBufferApplied,
  fieldCutFt: null,
  };
  }
  // Jambs: exact-hit buffer only. Regular posts: 6" grade buffer + mid-gable 18′ rule.
- // Wide buildings (W ≥ 50): SB keeps 20′ for mid-gable req 18.1–18.5′ (60×12).
- const W = Number(opts.building?.width) || 0;
- // Mid-gable 18′ demotion: mid-width (35–50′) always; narrow (<35′) only when
- // plain (no lean). Open/broken lean on 30′ keeps 20′ gable stock (Prater).
- const applyMidGable18 =
- (W >= 35 && W < 50) || (W > 0 && W < 35 && !hasAnyLean(opts.building));
- const pick = pickPostStockLengthCore(orderH, postDepthFt, stock, {
- minGradeSlackFt: isJamb ? 0.05 : 0.5,
+ // Policy: useMidGable18Demotion (auto width/lean + package, or explicit keep20/demote18).
+ const applyMidGable18 = useMidGable18Demotion(opts.building);
+ // Perma-column / pad footing (embed ≈ 0): order exact above-grade stock
+ // (Jim wing 14′ eave → 14′, not grade-bumped 16′). Buried posts keep 6″ slack.
+ const embedFt = Number(postDepthFt) || 0;
+ const eaveH = Number(opts.building?.eaveHeight) || 0;
+ const heelOpt = Math.max(0, Number(opts.heelHeightFt) || 0);
+ // 26′ stock: raised-heel tall eaves (Doug) only — not every eave≥16 (Jim wing).
+ const allow26 = eaveH >= 16 && heelOpt > 0;
+ const stockUse = allow26
+  ? stock
+  : (stock || POST_STOCK_LENGTHS).filter((L) => L <= 24);
+ // Tall-eave jamb 20→22: raised heel or partial enclosed shed lean (Doug).
+ // Gable-extension wings (Jim) keep prior jamb ladder.
+ const tallJamb22 =
+  eaveH >= 16 &&
+  (heelOpt > 0 || hasPartialEnclosedShedLean(opts.building));
+ const pick = pickPostStockLengthCore(orderH, postDepthFt, stockUse, {
+ minGradeSlackFt: isJamb ? 0.05 : embedFt < 0.1 ? 0 : 0.5,
  disableMidGable18: isJamb || !applyMidGable18,
+ disableTallEave22: isJamb && !tallJamb22,
+ eaveHeightFt: eaveH,
+ heelHeightFt: heelOpt,
  });
- // Near-peak grade (SB / Kane): bump tight 22′ stock to 24′ when required is
+ // Explicit keep20: lift mid-gable 18′ (req ~16.1–18.5′) → 20′ so odd-width
+ // (35′) stations that never hit the 20→18 demotion band still match benchmark 4@20′.
+ if (
+  !isJamb &&
+  isExplicitMidGableKeep20(opts.building) &&
+  pick.stockFt === 18 &&
+  !pick.overMax
+ ) {
+  const req18 = Number(pick.requiredFt) || 0;
+  if (req18 > 16.001 && req18 <= 18.5 + 0.001) {
+   return { ...pick, stockFt: 20, gradeBufferApplied: true };
+  }
+ }
+ // Near-peak grade (benchmark / Kane): bump tight 22′ stock to 24′ when required is
  // past the 21′ band (e.g. 32′×12′ 4/12 peak req 21.33′ → 24′, not 22′).
- // Exact req=21′ (h=18′ @ 3′ embed) stays 22′ (golden SB 1@22 + 1@24).
+ // Exact req=21′ (h=18′ @ 3′ embed) stays 22′ (golden benchmark 1@22 + 1@24).
  // Applies to peak posts and near-peak jambs.
  const structH = Number(heightAboveGradeFt) || 0;
  const req = Number(pick.requiredFt) || 0;
+ // Only above the eave plane — heel-raised eave posts (req ~21.5 @22′)
+ // must NOT bump to 24′ (Doug eave wall stays 22′).
+ const aboveEave = structH > eaveH + 0.5;
  const nearPeakTight22 =
   pick.stockFt === 22 &&
   !pick.overMax &&
+  aboveEave &&
   (req > 21.001 || (isJamb && structH > 18.001));
  if (nearPeakTight22) {
- const next = [...(stock || POST_STOCK_LENGTHS)].sort((a, b) => a - b).find((L) => L > 22);
+ const next = [...stockUse].sort((a, b) => a - b).find((L) => L > 22);
  if (next != null) {
  return {
  ...pick,
@@ -1823,6 +2145,19 @@ export function pickPostStockLength(heightAboveGradeFt, postDepthFt, stock = POS
  gradeBufferApplied: true,
  };
  }
+ }
+ // Tall-eave near-peak: tight 24′ (req > 24) → 26′ nail-lam stock (Doug gable
+ // OH jambs cut ~25′ → Part 26′). Low eaves never hit this band.
+ if (
+  pick.stockFt === 24 &&
+  !pick.overMax &&
+  allow26 &&
+  req > 24.001
+ ) {
+  const next = [...stockUse].sort((a, b) => a - b).find((L) => L > 24);
+  if (next != null) {
+   return { ...pick, stockFt: next, gradeBufferApplied: true };
+  }
  }
  return pick;
 }

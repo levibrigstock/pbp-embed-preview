@@ -33,7 +33,7 @@ export const PANEL_METAL_DRIP_MIN_IN = 3;
  */
 /** Short order-add (inches): 30×40 4/12 @ 3″ OH → 16′2″. */
 export const ROOF_ORDER_ADD_SHORT_IN = 1.5;
-/** Mid order-add (inches): 40×40 4/12 @ 3″ OH → 21′6″ (SB). */
+/** Mid order-add (inches): 40×40 4/12 @ 3″ OH → 21′6″ (benchmark). */
 export const ROOF_ORDER_ADD_MID_IN = 2;
 /** Long order-add (inches): Levi free side → 29′11″. */
 export const ROOF_ORDER_ADD_LONG_IN = 5.5;
@@ -45,10 +45,10 @@ export const ROOF_ORDER_ADD_MID_AT_FT = 20;
  */
 export const ROOF_ORDER_ADD_LONG_AT_FT = 28;
 
-/** Gable wall stock above roof-line (inches). SB: +1′2″ → 18′2″ steps on 30×12. */
+/** Gable wall stock above roof-line (inches). benchmark: +1′2″ → 18′2″ steps on 30×12. */
 export const GABLE_STOCK_ABOVE_RAKE_IN = 14;
 
-/** Eave wall panel height above eave (inches). SB: eave + 8″ → 12′8″ on 12′ eave. */
+/** Eave wall panel height above eave (inches). benchmark: eave + 8″ → 12′8″ on 12′ eave. */
 export const EAVE_WALL_STOCK_ABOVE_EAVE_IN = 8;
 
 // ── Girts ───────────────────────────────────────────────────────────
@@ -63,19 +63,19 @@ export const GIRT_STOCK_FT = 20;
  *
  * Small plain shops (any length with low eave, no lean): continuous LF girts,
  * rows stop below eave, no eave sub-fascia / gable fly. Matches:
- *   30×40×12 → 35@20′, 40×40×12 → 40@20′, 60×60×10 → 48@20′ (SB).
+ *   30×40×12 → 35@20′, 40×40×12 → 40@20′, 60×60×10 → 48@20′ (benchmark).
  *
- * Length alone does NOT force full package — SB 60×60×10 is still small-shop
+ * Length alone does NOT force full package — benchmark 60×60×10 is still small-shop
  * despite L ≥ 50′ (was wrongly 60 girts + fly rafters).
  *
  * Tall / lean jobs (eave ≥ 14′ or lean): eave girt row + per-wall pack + fascia
  * package → Levi 55×80×14 + lean ~130@20′.
  */
 /**
- * Always SB-matched package selection from building geometry.
+ * Always benchmark-matched package selection from building geometry.
  * (Internal test override: b.orderPackageMode = 'small'|'full' — not exposed in UI.)
  *
- * SB rules we follow automatically:
+ * benchmark rules we follow automatically:
  *   - Plain low eave (eave < 14′, no enclosed lean) → small-shop package
  *   - Eave ≥ 14′ OR enclosed lean → full production package
  */
@@ -99,6 +99,32 @@ export function hasEnclosedLean(b) {
   );
 }
 
+/**
+ * Partial enclosed shed lean (span < host wall). Full-length leans (Levi) and
+ * gable-extension wings (Jim) return false. Gates mixed 16′/18′/20′ girt packing
+ * so Doug-style cut lists emit shorter stock without touching Frank/Mark/Harr.
+ */
+export function hasPartialEnclosedShedLean(b) {
+  for (const lt of b?.leanTos || []) {
+    if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
+    if (lt.enclosed === false || lt.enclosure === 'open') continue;
+    if ((lt.roofStyle || 'shed') === 'gable') continue;
+    if ((lt.kind || 'leanto') === 'gable-extension') continue;
+    const wall = lt.wall || 'left';
+    const wallLen =
+      wall === 'left' || wall === 'right'
+        ? Number(b?.length) || 0
+        : Number(b?.width) || 0;
+    const offset = Number(lt.offset) || 0;
+    const leanLen =
+      Number(lt.length) > 0
+        ? Math.min(Number(lt.length) || 0, Math.max(0, wallLen - offset))
+        : 0; // length≤0 ⇒ full-wall cover
+    if (leanLen > 0.1 && leanLen < wallLen - 0.1) return true;
+  }
+  return false;
+}
+
 /** Count of gable-style leans (ridge out from main wall). */
 export function gableLeanCount(b) {
   return (b?.leanTos || []).filter(
@@ -108,13 +134,13 @@ export function gableLeanCount(b) {
 
 /**
  * Whether to use full production package (girts/trim/fly/opening lumber).
- * Always matches SmartBuild sizing rules when orderPackageMode is auto (default).
+ * Always matches Benchmark sizing rules when orderPackageMode is auto (default).
  */
 export function useFullGirtPackage(b) {
   const mode = orderPackageMode(b);
   if (mode === 'full') return true;
   if (mode === 'small') return false;
-  // --- SB auto ---
+  // --- benchmark auto ---
   const H = Number(b?.eaveHeight) || 0;
   // Enclosed lean or tall eave → full per-wall package (Levi-style)
   return hasEnclosedLean(b) || H >= 14;
@@ -126,12 +152,51 @@ export function girtPackMode(b) {
 }
 
 /**
+ * Whether mid-gable posts with required ~18.1–18.5′ demote 20′→18′ stock.
+ *
+ * Explicit `b.midGablePostPolicy`:
+ *   keep20 / 20 → false (order covering 20′ — Frank benchmark 35×50)
+ *   demote18 / 18 → true
+ *   auto (default) → package + width/lean rule below
+ *
+ * Auto:
+ *   full girt package → false (keep covering 20′ stock)
+ *   W ≥ 50 → false (wide barns keep 20′)
+ *   W ∈ [35, 50) → true (30×40 / 40×40 / 35×55 goldens)
+ *   W < 35 → true iff no lean (plain narrow; Prater open lean keeps 20′)
+ */
+export function useMidGable18Demotion(b) {
+  const raw = String(b?.midGablePostPolicy || 'auto').toLowerCase().trim();
+  if (raw === 'keep20' || raw === '20') return false;
+  if (raw === 'demote18' || raw === '18') return true;
+  // --- auto ---
+  if (useFullGirtPackage(b)) return false;
+  const W = Number(b?.width) || 0;
+  if (W >= 50) return false;
+  if (W >= 35 && W < 50) return true;
+  if (W > 0 && W < 35) return !hasAnyLean(b);
+  return false;
+}
+
+/**
+ * Explicit keep20 policy (not auto-wide / auto-full).
+ * Lifts mid-gable posts that landed on 18′ (req ~16.1–18.5′) to covering 20′
+ * so odd-width barns (35′) match benchmark 4@20′ — demotion alone only covers the
+ * 18.1–18.5′ band (2 of 4 stations when W is not a multiple of spacing).
+ */
+export function isExplicitMidGableKeep20(b) {
+  const raw = String(b?.midGablePostPolicy || 'auto').toLowerCase().trim();
+  return raw === 'keep20' || raw === '20';
+}
+
+
+/**
  * Whether girt elevations include the eave station.
  * Full package / enclosed lean / long plain (L ≥ 80′) nail an eave row.
  * Open carport leans do NOT (Prater open lean matches plain 30×40 → 35@20′).
  */
 export function girtIncludeEaveNailer(b) {
-  // Long plain shops (L ≥ 80′) still get an eave girt row in SB (Harr 40×80 → 68@20′).
+  // Long plain shops (L ≥ 80′) still get an eave girt row in benchmark (Harr 40×80 → 68@20′).
   const L = Number(b?.length) || 0;
   return useFullGirtPackage(b) || hasEnclosedLean(b) || L >= 80;
 }
@@ -173,7 +238,7 @@ export function purlinStationPad(b) {
 /**
  * Purlin stations per roof slope.
  * Horizontal half-run for pitch < 6 (locks 30×40 / 40×40 / 60×60).
- * Along-slope run for pitch ≥ 6 (SB Harr 40×80×12 6/12 → 13/side).
+ * Along-slope run for pitch ≥ 6 (benchmark Harr 40×80×12 6/12 → 13/side).
  */
 export function purlinRowsPerSide(b) {
   const spacingFt = (Number(b?.purlinSpacingIn) || 24) / 12;
@@ -189,7 +254,7 @@ export function purlinRowsPerSide(b) {
 
 /**
  * Extra 12′ purlin stubs for long production packages (end/ridge cut waste).
- * Levi 80′ lists need these; plain 60×60 SB does not (was inflating 12′ count).
+ * Levi 80′ lists need these; plain 60×60 benchmark does not (was inflating 12′ count).
  * Gate on L ≥ 80′ (not 60′).
  */
 export function purlinExtra12StubCount(mainRows, buildingLengthFt) {
@@ -200,15 +265,24 @@ export function purlinExtra12StubCount(mainRows, buildingLengthFt) {
 }
 
 /**
- * Mid-length end/ridge stubs (12′): 60′ ≤ L < 80′.
- * 60×60 SB: ceil(34/4)=9 → with staggered upgrade yields 27@12′.
+ * Mid-length end/ridge stubs (12′): 50′ ≤ L < 80′.
+ * Frank 50′: ceil(22/4)=6 with double-stub pack → 48@16+46@12.
+ * 60×60 benchmark: ceil(34/4)=9 → with staggered upgrade yields 27@12′.
  * Not applied at L ≥ 80′ (that band uses purlinExtra12StubCount).
  */
 export function purlinMidLength12StubCount(mainRows, buildingLengthFt) {
   const L = Number(buildingLengthFt) || 0;
   const rows = Number(mainRows) || 0;
-  if (rows <= 0 || L < 60 || L >= 80) return 0;
-  return Math.ceil(rows / 4);
+  if (rows <= 0 || L >= 80) return 0;
+  if (L >= 60) return Math.ceil(rows / 4);
+  // 50 ≤ L < 60: only when double-12 stub pack (run rem in (12,16)) — Frank 50′.
+  // Skip L=55 rem~3 (35×55 regression keeps 20@12).
+  if (L >= 50) {
+    const run = purlinMainRunLengthFt(L);
+    const rem = purlinRunRemainderFt(run);
+    if (rem > 12 && rem < 16) return Math.ceil(rows / 4);
+  }
+  return 0;
 }
 
 /** Main purlin run length: L − 4′ (2′ gable inset each end) when L > 8′. */
@@ -219,19 +293,29 @@ export function purlinMainRunLengthFt(buildingLengthFt) {
 
 /**
  * Pack one purlin run into 16′ + 12′ stock (greedy long-first).
- * rem after full 16′s: >12 → another 16; else if >0 → one 12.
+ * rem after full 16′s:
+ *   0 < rem ≤ 12 → one 12′ stub
+ *   12 < rem < 16 → two 12′ stubs (not one 16′) so mid-length shops
+ *     (e.g. 50′ → run 46′) stock leftover stations on 12′ boards (Frank benchmark).
  * @returns {{ 16?: number, 12?: number }}
  */
 export function packPurlinRun(runLenFt) {
   const counts = {};
   let rem = Math.max(0, Number(runLenFt) || 0);
   while (rem > 0.01) {
-    let pick;
-    if (rem >= 16) pick = 16;
-    else if (rem > 12) pick = 16;
-    else pick = 12;
-    counts[pick] = (counts[pick] || 0) + 1;
-    rem = Math.round((rem - Math.min(pick, rem)) * 1000) / 1000;
+    if (rem >= 16) {
+      counts[16] = (counts[16] || 0) + 1;
+      rem = Math.round((rem - 16) * 1000) / 1000;
+      continue;
+    }
+    if (rem > 12) {
+      // Leftover between 12′ and 16′: prefer stub pack (2×12) over overshoot 16′.
+      counts[12] = (counts[12] || 0) + 2;
+      rem = 0;
+      break;
+    }
+    counts[12] = (counts[12] || 0) + 1;
+    rem = Math.round((rem - Math.min(12, rem)) * 1000) / 1000;
     if (rem < 0) rem = 0;
   }
   return counts;
@@ -259,16 +343,16 @@ export function packLeanOpenPurlinRun(runLenFt) {
 }
 
 /**
- * End remainder after max full 16′ boards on a run (0 if exact or rem handled as extra 16).
+ * End remainder after max full 16′ boards on a run.
  * Used for staggered upgrade gate: 56′ → 8′, 36′ → 4′, 76′ → 12′.
+ * rem in (12, 16) uses double-12 stub pack (see packPurlinRun) — return that
+ * rem so purlinDoubleStubUpgradeCount can upgrade some 12→16.
  */
 export function purlinRunRemainderFt(runLenFt) {
   const run = Math.max(0, Number(runLenFt) || 0);
   if (run < 0.01) return 0;
   const full = Math.floor(run / 16 + 1e-9) * 16;
   const rem = Math.round((run - full) * 1000) / 1000;
-  // rem > 12 is ordered as another 16′ (not a 12′ stub)
-  if (rem > 12) return 0;
   return rem;
 }
 
@@ -286,8 +370,22 @@ export function purlinStaggerUpgradeCount(mainRows, runLenFt) {
   const run = Number(runLenFt) || 0;
   if (rows <= 0 || run < 48) return 0;
   const rem = purlinRunRemainderFt(run);
+  // Classic stagger: mid stub 8′ ≤ r < 12′ (60×60 rem 8).
   if (rem < 8 || rem >= 12) return 0;
   return Math.max(0, Math.floor(rows / 2) - 1);
+}
+
+/**
+ * When pack ends in 2×12 stubs (rem in (12, 16)), upgrade ~rows/5.5 of those
+ * extra 12′ boards to 16′ (Frank 22 rows → +4@16 −4@12 → toward 48/46 with mid stubs).
+ */
+export function purlinDoubleStubUpgradeCount(mainRows, runLenFt) {
+  const rows = Number(mainRows) || 0;
+  const run = Number(runLenFt) || 0;
+  if (rows <= 0 || run < 40) return 0;
+  const rem = purlinRunRemainderFt(run);
+  if (rem <= 12 || rem >= 16) return 0;
+  return Math.max(0, Math.round(rows / 5.5));
 }
 
 /**
@@ -298,7 +396,8 @@ export function purlinStaggerUpgradeCount(mainRows, runLenFt) {
  * Locks:
  *   30×40 → 36@16 + 18@12
  *   40×40 → 48@16 + 24@12
- *   60×60 → 118@16 + 27@12  (SB)
+ *   35×50 → 48@16 + 46@12  (Frank benchmark — double-12 stub + mid stubs)
+ *   60×60 → 118@16 + 27@12  (benchmark)
  *   Levi main (before lean) → 128@16 + 43@12
  *
  * @returns {{ 16: number, 12: number }}
@@ -310,7 +409,7 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
   const counts = { 16: 0, 12: 0 };
   if (rows <= 0 || run < 0.1) return counts;
 
-  // Steep plain shops on multiple-of-16 lengths: SB stocks full-L 16′ boards
+  // Steep plain shops on multiple-of-16 lengths: benchmark stocks full-L 16′ boards
   // (Harr 80′ → 5×16/row = 130@16, not 4×16+12 on the 76′ inset run).
   const pitch = Number(b?.pitch) || 0;
   const fullLPack =
@@ -332,6 +431,13 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
     counts[16] += can;
   }
 
+  const up2 = fullLPack ? 0 : purlinDoubleStubUpgradeCount(rows, packRun);
+  if (up2 > 0) {
+    const can = Math.min(up2, counts[12]);
+    counts[12] -= can;
+    counts[16] += can;
+  }
+
   const mid12 = fullLPack ? 0 : purlinMidLength12StubCount(rows, L);
   if (mid12 > 0) counts[12] += mid12;
 
@@ -339,6 +445,18 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
   // Harr-class: 26 rows × full 80′ → 130@16 needs 10×12′ end/ridge stubs (ceil(L/8)).
   if (fullLPack) long12 = Math.max(long12, Math.ceil(L / 8));
   if (long12 > 0) counts[12] += long12;
+
+  // Partial enclosed shed lean: benchmark mixes heavier 12′ on the main (Doug 47@16+73@12).
+  // Reverse stagger-heavy 16′ pack and add mid stubs — Mark/Levi full-length leans skip.
+  if (!fullLPack && hasPartialEnclosedShedLean(b)) {
+    const demote = Math.min(counts[16] || 0, Math.round(rows * 1.1));
+    if (demote > 0) {
+      counts[16] -= demote;
+      counts[12] = (counts[12] || 0) + demote;
+    }
+    const extra = Math.max(0, Math.ceil(rows / 2) - mid12);
+    if (extra > 0) counts[12] = (counts[12] || 0) + extra;
+  }
 
   return counts;
 }
@@ -349,8 +467,8 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
 /**
  * Truss block sets (12′ 2×6). Main: ceil(L/40).
  * A gable-style lean carries its own mini-ridge/truss and needs one extra set
- * (SB 60′+gable-lean → 3). Shed leans hang off the main purlins and add none
- * (SB Levi 80′+shed-lean → 2, not 3).
+ * (benchmark 60′+gable-lean → 3). Shed leans hang off the main purlins and add none
+ * (benchmark Levi 80′+shed-lean → 2, not 3).
  * @param {number} buildingLengthFt
  * @param {object} [b]
  */
@@ -390,7 +508,7 @@ export function roofPanelSlopeLengthFt(b) {
   const oh = panelTotalOverhangFt(b);
   const W = Number(b?.width) || 0;
   const pitch = (Number(b?.pitch) || 4) / 12;
-  // Production model (Levi / SB): vertical rise = wall half-run × pitch;
+  // Production model (Levi / benchmark): vertical rise = wall half-run × pitch;
   // metal OH extends the horizontal run past the eave (not re-scaling rise).
   // Matches free-side 29′11″ on 55′ @ 6″ OH and continuous lean host cuts.
   if ((b?.roofStyle || 'gable') === 'mono') {
@@ -403,18 +521,18 @@ export function roofPanelSlopeLengthFt(b) {
 /**
  * Order-cut allowance (size-general):
  *   slope < 20′           → 1.5″  (30×40 @ 3″ OH → 16′2″)
- *   slope ≥ 20′, OH < 6″  → 2″    (40×40 → 21′6″; 60×60 → 32′0″ SB)
+ *   slope ≥ 20′, OH < 6″  → 2″    (40×40 → 21′6″; 60×60 → 32′0″ benchmark)
  *   slope ≥ 20′, OH ≥ 6″  → 5.5″  (Levi free side 55′ @ 6″ OH → 29′11″)
  *
  * Long add is tied to wide metal OH packages, not slope alone — otherwise
- * 60×60 @ 3″ OH wrongly got 32′4″ instead of SB 32′0″.
+ * 60×60 @ 3″ OH wrongly got 32′4″ instead of benchmark 32′0″.
  * @param {number} slopeFt
  * @param {object} [b] building (for metal OH); omit → mid/short only by slope
  */
 export function roofPanelOrderAddInches(slopeFt, b = null) {
   const s = Number(slopeFt) || 0;
   if (s < ROOF_ORDER_ADD_MID_AT_FT) {
-    // Mid-short band: ~32′×4/12 @ 3″ OH slope ~17.1′ → SB Kane 18′4″ needs ~15″ add.
+    // Mid-short band: ~32′×4/12 @ 3″ OH slope ~17.1′ → benchmark Kane 18′4″ needs ~15″ add.
     // Keep classic short add (1.5″) below 16.75′ so 30×40 stays 16′2″.
     if (s >= 16.75 && s < 18.25) return 15;
     return ROOF_ORDER_ADD_SHORT_IN;
@@ -449,7 +567,7 @@ export function gableGeometricPeakFt(b) {
 /**
  * Peak wall-panel stock height (ft) after production snap.
  * Base: geo peak + 14″. When that lands on ~18′6″ (e.g. 32′×12′ 4/12),
- * SB snaps peak stock to 20′ (Kane Job Review: 2@20′ + 19′6″ ladder).
+ * benchmark snaps peak stock to 20′ (Kane Job Review: 2@20′ + 19′6″ ladder).
  * 30×12 stays ~18′2″; 40×12 stays ~19′10″.
  */
 export function gablePeakStockHeightFt(b) {
@@ -473,7 +591,7 @@ export function gableStockAboveRakeFt(b = null) {
 /**
  * Ladder step for gable wall packing (inches).
  * Kane peak-snap → 6″. Otherwise match roof-line drop per 3′ bay:
- * coverage × pitch (4/12 → 12″, 6/12 → 18″). SB Harr uses 18″ steps.
+ * coverage × pitch (4/12 → 12″, 6/12 → 18″). benchmark Harr uses 18″ steps.
  */
 export function gablePanelLadderInches(b) {
   const geo = gableGeometricPeakFt(b);
@@ -485,7 +603,7 @@ export function gablePanelLadderInches(b) {
 
 export function eaveWallPanelHeightFt(b) {
   const eave = Number(b?.eaveHeight) || 12;
-  // When gable peak stock snaps to 20′ (32×12 4/12), SB orders eave walls at
+  // When gable peak stock snaps to 20′ (32×12 4/12), benchmark orders eave walls at
   // 13′10″ (= eave + 22″), consolidating stock with the tall gable package.
   // Default remains eave + 8″ (12′8″) for 30/40/60 goldens.
   const ladder = gablePanelLadderInches(b);
@@ -505,7 +623,13 @@ export const TRIM_STOCK_FT = 10;
  */
 export function trimRunExtraPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
-  if (L < 60) return 1;
+  if (L < 60) {
+    // Wood-OH mid shops: benchmark adds an extra lap (Frank 50′ → ridge 7 / eave 12).
+    // Square-eave plains (30×40 / 40×40 overhangIn 0) stay +1.
+    const woodOh = Number(b?.overhangIn) || 0;
+    if (b && woodOh >= 6 && L >= 50) return 2;
+    return 1;
+  }
   // Full / lean production: +2 (Levi 80′ → ridge 10, eave 18).
   // Plain small-shop long: +1 (Harr 80′ → ridge 9, eave 17).
   if (b && !useFullGirtPackage(b) && !hasAnyLean(b)) return 1;
@@ -514,7 +638,7 @@ export function trimRunExtraPieces(buildingLengthFt, b = null) {
 
 /**
  * Ridge cap pieces of 10′ along main ridge + gable lean ridges.
- * Main: ceil(L/10)+extra. Each gable lean: +1 (SB 60′+lean → 9).
+ * Main: ceil(L/10)+extra. Each gable lean: +1 (benchmark 60′+lean → 9).
  * @param {number} buildingLengthFt
  * @param {object} [b] optional building for lean extras
  */
@@ -522,17 +646,30 @@ export function ridgeCapPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   const stock = TRIM_STOCK_FT;
   let n = Math.max(1, Math.ceil(L / stock - 1e-9) + trimRunExtraPieces(L, b));
-  // Gable lean ridge runs out from main wall — order +1 stock per lean (SB)
-  if (b) n += gableLeanCount(b);
+  // Gable lean / gable-extension ridges
+  if (b) {
+    for (const lt of b.leanTos || []) {
+      if (!lt || (lt.roofStyle || 'shed') !== 'gable') continue;
+      const depth = Number(lt.depth) || 0;
+      if (!(depth > 0.1)) continue;
+      if ((lt.kind || 'leanto') === 'gable-extension') {
+        // Wing ridge runs along depth (Jim 43′ → ceil(43/10)+1)
+        n += Math.max(1, Math.ceil(depth / stock - 1e-9) + 1);
+      } else {
+        // Plain gable lean: +1 stock (benchmark 60′+lean → 9)
+        n += 1;
+      }
+    }
+  }
   return n;
 }
 
 /**
  * Eave edge pieces for both main eaves + lean outer eaves.
  * Main: ceil(2L/10)+extra. A gable lean adds an outer eave run that returns to
- * the main roof at two valleys → +1 stock piece (SB 60′+gable-lean → 15).
+ * the main roof at two valleys → +1 stock piece (benchmark 60′+gable-lean → 15).
  * Shed leans drain onto the main eave line and add no separate eave-edge stock
- * (SB Levi 80′+shed-lean → 18, not 19).
+ * (benchmark Levi 80′+shed-lean → 18, not 19).
  * @param {number} buildingLengthFt
  * @param {object} [b] optional building for lean extras
  */
@@ -540,7 +677,24 @@ export function eaveTrimPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   const stock = TRIM_STOCK_FT;
   let n = Math.max(1, Math.ceil((2 * L) / stock - 1e-9) + trimRunExtraPieces(L, b));
-  if (b && gableLeanCount(b) > 0) n += 1;
+  // Plain gable leans (not gable-extension): +1 outer eave return (benchmark 60′+lean → 15)
+  if (b) {
+    const plainGableLeans = (b.leanTos || []).filter(
+      (lt) =>
+        lt &&
+        (lt.roofStyle || 'shed') === 'gable' &&
+        (lt.kind || 'leanto') !== 'gable-extension' &&
+        (Number(lt.depth) || 0) > 0.1,
+    ).length;
+    if (plainGableLeans > 0) n += 1;
+    // Gable-extension: two eaves along wing depth (Jim 2×43′ → +9 → EaveEdge 19)
+    for (const lt of b.leanTos || []) {
+      if (!lt || (lt.kind || 'leanto') !== 'gable-extension') continue;
+      const depth = Number(lt.depth) || 0;
+      if (!(depth > 0.1)) continue;
+      n += Math.max(1, Math.ceil((2 * depth) / stock - 1e-9));
+    }
+  }
   // Open shed lean outer eave drip is ordered as LET (Prater 40′ → +5 → 14).
   // Enclosed shed leans drain at the main eave / dual-wing pack — no add.
   if (b) {
@@ -567,7 +721,7 @@ export function eaveTrimPieces(buildingLengthFt, b = null) {
 
 /**
  * Valley trim pieces where gable lean meets main roof (two valleys per gable lean).
- * SB: 2 @ 10′ @ ~154°.
+ * benchmark: 2 @ 10′ @ ~154°.
  */
 export function valleyTrimPieces(b) {
   return gableLeanCount(b) * 2;
@@ -575,7 +729,7 @@ export function valleyTrimPieces(b) {
 
 /**
  * Full production package (trim fascia/TOW + framing sub-fascia/fly):
- * Plain small shops (30×40 SB lists) omit these; large / tall / lean jobs include them.
+ * Plain small shops (30×40 benchmark lists) omit these; large / tall / lean jobs include them.
  * Same gate as full girt package.
  */
 export function includeFullTrimPackage(b) {
@@ -597,7 +751,7 @@ export function smallShopOhHeaderCompanionQty(_b) {
 
 /**
  * Corner trim stock length(s) for main building corners.
- * 12′ eave → all 14′ (eave + 2′ wrap) — SB 30×40.
+ * 12′ eave → all 14′ (eave + 2′ wrap) — benchmark 30×40.
  * 14′ eave → 2@16 + 2@12 — Levi.
  * >16′ → 20/16 mix.
  * @returns {{ lengthFt: number, qty: number }[]}
@@ -631,13 +785,81 @@ export function mainCornerTrimPack(b) {
 }
 
 /**
- * Top-of-wall trim pieces (full package only).
+ * True when a plain small-shop still needs FJ / SANG eave trim without the
+ * full girt/eave-row package. Wood overhang ≥ 6″ (Frank 1′ OH → FJ19/SANG21);
+ * square-eave small shops (Harr OH 0) stay without FJ/SANG.
+ */
+
+/**
+ * True when wood frame overhang qualifies for standard-eave benchmark packaging
+ * (FJ/SANG, trim lap +1, closure +1, skirt door nest −1). Matches
+ * includeStandardEaveTrim (≥ 6″).
+ */
+export function hasWoodOverhangStandardEave(b) {
+  return (Number(b?.overhangIn) || 0) >= 6;
+}
+
+export function includeStandardEaveTrim(b) {
+  if (includeFullTrimPackage(b)) return false;
+  // Dual enclosed eave wings omit FJ/SANG — gated in engine via hasDualFullEnclosedEaveLeans.
+  return hasWoodOverhangStandardEave(b);
+}
+
+/**
+ * Top-of-wall trim pieces (full package).
  * ceil(2×(L+W)/10)+4 → 31 on 55×80.
  */
 export function topOfWallPieces(b) {
   const L = Number(b?.length) || 0;
   const W = Number(b?.width) || 0;
-  return Math.max(1, Math.ceil((2 * (L + W)) / TRIM_STOCK_FT - 1e-9) + 4);
+  let peri = 2 * (L + W);
+  // Gable-extension wing outer faces (outer width + two depth sides)
+  for (const lt of b?.leanTos || []) {
+    if (!lt || (lt.kind || 'leanto') !== 'gable-extension') continue;
+    const wallLen =
+      lt.wall === 'left' || lt.wall === 'right'
+        ? Number(b?.length) || 0
+        : Number(b?.width) || 0;
+    const offset = Number(lt.offset) || 0;
+    const length =
+      Number(lt.length) > 0
+        ? Math.min(Number(lt.length) || 0, Math.max(0, wallLen - offset))
+        : Math.max(0, wallLen - offset);
+    const depth = Number(lt.depth) || 0;
+    if (length > 0.1 && depth > 0.1) peri += length + 2 * depth;
+  }
+  let qty = Math.max(1, Math.ceil(peri / TRIM_STOCK_FT - 1e-9) + 4);
+  // Partial enclosed shed lean: +ceil(leanLen/10) FJ for lean eave run (Doug 22→24).
+  if (hasPartialEnclosedShedLean(b)) {
+    let leanLen = 0;
+    for (const lt of b?.leanTos || []) {
+      if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
+      if (lt.enclosed === false || lt.enclosure === 'open') continue;
+      if ((lt.roofStyle || 'shed') === 'gable') continue;
+      if ((lt.kind || 'leanto') === 'gable-extension') continue;
+      leanLen = Math.max(leanLen, Number(lt.length) || 0);
+    }
+    if (leanLen > 0.1) qty += Math.max(1, Math.ceil(leanLen / TRIM_STOCK_FT - 1e-9));
+  }
+  return qty;
+}
+
+/**
+ * FJ count for standard-eave small shops (wood OH, no full package).
+ * ceil(2×(L+W)/10)+2 → Frank 35×50 → 19 (benchmark).
+ */
+export function topOfWallPiecesStandardEave(b) {
+  const L = Number(b?.length) || 0;
+  const W = Number(b?.width) || 0;
+  return Math.max(1, Math.ceil((2 * (L + W)) / TRIM_STOCK_FT - 1e-9) + 2);
+}
+
+/**
+ * SANG / eave-fascia count for standard-eave small shops.
+ * ceil(2×(L+W)/10)+4 → Frank 35×50 → 21 (benchmark).
+ */
+export function eaveFasciaPiecesStandardEave(b) {
+  return topOfWallPieces(b);
 }
 
 /**
@@ -679,6 +901,8 @@ export function describePolicyForBuilding(b) {
       : 'small-shop (headers only; no Trimmer/Sill/Backing)',
     ridgeCapPieces: ridgeCapPieces(b?.length, b),
     eaveTrimPieces: eaveTrimPieces(b?.length, b),
+    midGablePostPolicy: String(b?.midGablePostPolicy || 'auto').toLowerCase().trim() || 'auto',
+    midGable18Demotion: useMidGable18Demotion(b),
   };
 }
 
@@ -686,13 +910,14 @@ export function describePolicyForBuilding(b) {
 export function formatPolicySummary(b) {
   const p = describePolicyForBuilding(b);
   const lines = [
-    `SB package: ${p.girtPackage}`,
+    `Benchmark package: ${p.girtPackage}`,
     `Opening lumber: ${p.openingLumber}`,
     `Girt deduct (openings): −${p.girtOpeningDeduct}`,
     `Purlins: ${p.purlinPack16}@16′ + ${p.purlinPack12}@12′ (run ${p.purlinMainRunFt}′, pad ${p.purlinStationPad}, upgrade ${p.purlinStaggerUpgrade}, mid12 ${p.purlinMid12Stubs}, long12 ${p.purlinLong12Stubs})`,
     `Roof cut: ${Number(p.roofCutFt).toFixed(3).replace(/\.?0+$/, '')}′  |  Eave wall panel: ${Number(p.eaveWallPanelFt).toFixed(3).replace(/\.?0+$/, '')}′  |  Metal OH: ${p.panelMetalOverhangIn}″`,
     `Trim: ridge ${p.ridgeCapPieces} · eave edge ${p.eaveTrimPieces} · full fascia/TOW/fly: ${p.fullTrimPackage ? 'yes' : 'no'}`,
     `OH header companion 2x6: ${p.smallShopOhHeaderCompanion}`,
+    `Mid-gable post stock: ${p.midGable18Demotion ? 'demote 20→18′' : 'keep 20′'} (policy ${p.midGablePostPolicy})`,
   ];
   return lines.join('\n');
 }

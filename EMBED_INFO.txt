@@ -1,1 +1,1 @@
-PoleBarn Pro embed — clean elevations (no dim tags) v=20260908h
+PoleBarn Pro embed — develop sync (takeoff+benchmark+colors) v=20260908o

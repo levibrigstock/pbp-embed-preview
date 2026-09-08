@@ -2124,7 +2124,7 @@ export class SceneView {
  }
 
  /**
-   * Production-style trim package matching SmartBuild brochure 3D.
+   * Production-style trim package matching Benchmark brochure 3D.
    *
    * Shared alignment system (all pieces use the same `out` / `leg` / `T`):
    *   wall metal outer ≈ building-line ± 0.03'
@@ -2166,13 +2166,13 @@ export class SceneView {
  const outerX = (xWall, ox) => xWall + ox * (out - T * 0.5);
  const outerZ = (zWall, oz) => zWall + oz * (out - T * 0.5);
 
- // ── Ridge cap (gable only) — SB-style formed inverted-V ──
- // SmartBuild top-down: wide smooth brake-formed cap (no panel ribs under it),
+ // ── Ridge cap (gable only) — benchmark-style formed inverted-V ──
+ // Benchmark top-down: wide smooth brake-formed cap (no panel ribs under it),
  // sharp peak crease, parallel outer edges running the full ridge length.
  if ((b.roofStyle || 'gable') === 'gable' && rise > 0.15) {
  const ridgeLen = L + oh * 2 + 0.18;
  const pitchAng = Math.atan2(rise, W / 2);
- // ~11" each wing along slope (~22" total) — matches SB brochure width
+ // ~11" each wing along slope (~22" total) — matches benchmark brochure width
  const wingAlong = 0.95;
  const wingThk = 0.1;
  const lift = 0.08;
@@ -2209,7 +2209,7 @@ export class SceneView {
  fold.castShadow = true;
  group.add(fold);
 
- // Outer edge beads — parallel lines along each side of the cap (SB look)
+ // Outer edge beads — parallel lines along each side of the cap (benchmark look)
  for (const side of [-1, 1]) {
  const mid = wingAlong * 0.94;
  const x = W / 2 + side * mid * Math.cos(pitchAng);
@@ -2357,7 +2357,7 @@ export class SceneView {
  group.add(pan);
  }
 
- // Peak join — same visual weight as ridge-end on SB
+ // Peak join — same visual weight as ridge-end on benchmark
  const peak = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.12, T * 1.2), mat);
  peak.position.set(
  W / 2,
@@ -2368,7 +2368,7 @@ export class SceneView {
  }
  }
 
- // ── Vertical corner trim — ONE formed L-piece per corner (SB style) ──
+ // ── Vertical corner trim — ONE formed L-piece per corner (benchmark style) ──
  // Single extruded L profile (not two boxes with a gap). Outer faces sit at
  // `out`; legs run along each wall into the building; top flush with eave band.
  const corners = [
@@ -2716,7 +2716,7 @@ export class SceneView {
    * Auto-flips winding if the face normal points downward so roofs stay visible.
    *
    * @param {'eave'|'downslope'} [uvMode='downslope']
-   *   downslope (SB): corners [eaveA, ridgeA, ridgeB, eaveB] → U along eave, V downslope
+   *   downslope (benchmark): corners [eaveA, ridgeA, ridgeB, eaveB] → U along eave, V downslope
    *   eave (legacy): U across first edge, V across diagonal edge
    */
  _addRoofQuad(group, corners, mat, flip = false, uvMode = 'downslope') {
@@ -3207,7 +3207,7 @@ export class SceneView {
  this._addLeanSlab(group, pkg, lt, b);
  }
 
- // Structure visibility (SB sales look):
+ // Structure visibility (benchmark sales look):
  // - Frame / metal-off: posts + purlins + outer bearer
  // - Skin on + enclosed: metal only (no framing bleed)
  // - Skin on + open carport: posts only (no blue purlins / orange bearer clutter)
@@ -3576,7 +3576,7 @@ export class SceneView {
  return;
  }
 
- // Roof plan corners (include side OH past ends for a clean box eave like SB)
+ // Roof plan corners (include side OH past ends for a clean box eave like benchmark)
  const rI1 = { x: i1x, z: i1z };
  const rI2 = { x: i2x, z: i2z };
  const rO1 = { x: o1x, z: o1z };
@@ -3591,7 +3591,7 @@ export class SceneView {
  const roofYOutTip = hAtOuter + slopeOut * ohFt + 0.02;
 
  if (!isGable) {
- // Shed mono — SB lean: ribs attach→outer (90° from main roof).
+ // Shed mono — benchmark lean: ribs attach→outer (90° from main roof).
  this._addLeanRoofPlane(
  group,
  rI1,
@@ -3606,7 +3606,7 @@ export class SceneView {
  depth + ohFt * 2,
  length + sideOh * 2,
  );
- // Lean eave trim package (SB): vertical drip faces OUTSIDE roof edges,
+ // Lean eave trim package (benchmark): vertical drip faces OUTSIDE roof edges,
  // high-edge fascia connects up into main eave.
  {
  const outNx = (o1x - i1x) / (Math.hypot(o1x - i1x, o1z - i1z) || 1);
@@ -3634,7 +3634,7 @@ export class SceneView {
  });
  }
  } else {
- // Gable lean (SB top-down reference): lean peak sits ON the main roof eave
+ // Gable lean (benchmark top-down reference): lean peak sits ON the main roof eave
  // metal — flush with roof surface, not hanging under the overhang/sidewall.
  // Ridge runs outer peak → onto main roof. No under-eave T-joint.
  const halfW = length / 2 || 1;
@@ -3656,7 +3656,7 @@ export class SceneView {
  // Sit lean ON TOP of main roof metal (not under it)
  const onRoofLift = 0.22;
  // How far lean peak sits onto main roof (in from eave tip, up the slope)
- // SB: peak clearly up on main panels — push further past eave (~3.5′)
+ // benchmark: peak clearly up on main panels — push further past eave (~3.5′)
  const ontoRoof = Math.max(mainOhFt + 3.25, 3.5);
  const roofEdgeOut = Math.max(mainOhFt, 0.15);
 
@@ -3680,7 +3680,7 @@ export class SceneView {
  mainOhFt;
  const mainSlope = mainRise / Math.max(halfSpan, 1);
  const peakY = roofTop + ontoRoof * mainSlope + onRoofLift;
- // Outer peak of lean — level ridge out from peak-on-roof (SB flush look)
+ // Outer peak of lean — level ridge out from peak-on-roof (benchmark flush look)
  // Drop slightly so water runs off lean, not into main
  const outerPeakY = peakY - 0.06;
  // Side eaves of lean (gable drop)
@@ -4293,7 +4293,7 @@ export class SceneView {
  }
 
  /**
-   * Outer gable-end metal on a gable lean (SB: dark metal triangle on the lean front).
+   * Outer gable-end metal on a gable lean (benchmark: dark metal triangle on the lean front).
    * Fills peak → left eave corner → right eave corner on the outer face.
    * Open bay below eave line stays clear (posts only).
    */
@@ -4761,7 +4761,7 @@ export class SceneView {
  // outer mid-line posts come from package; corners guaranteed
  ].filter(Boolean);
 
- // Gable lean (SB): peak sits ON main roof; outer posts track lean side eave
+ // Gable lean (benchmark): peak sits ON main roof; outer posts track lean side eave
  let defaultH = Number(lt.eaveHeight) || 10;
  if ((lt.roofStyle || 'shed') === 'gable') {
  const leanLen = Number(pkg.length) || Number(lt.length) || 12;
@@ -4856,7 +4856,7 @@ export class SceneView {
    * This is the piece that was wrong: it must be a **vertical eave-style fascia**
    * along the attach line (// main wall), NOT a flat strip on the lean roof.
    * It hangs under the lean high roof edge and extends **up the main wall** to
-   * meet the main building eave fascia — continuous black trim seal (SB).
+   * meet the main building eave fascia — continuous black trim seal (benchmark).
    *
    * Defaults for no-leak metal connection (inches):
    *   upturnIn  3.5  — cover up main wall toward main eave
@@ -4929,7 +4929,7 @@ export class SceneView {
  }
 
  /**
-   * SB gable lean on main roof — clean ridge + valleys (NO under-eave T-bar).
+   * benchmark gable lean on main roof — clean ridge + valleys (NO under-eave T-bar).
    *
    * Peak of lean sits ON the main roof metal. Ridge runs outer → peak.
    * Valleys follow lean roof edges where they meet the main roof surface.

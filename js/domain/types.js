@@ -415,7 +415,7 @@ export function createBuilding(partial = {}) {
  girtSize: ['2x4', '2x6', '2x8'].includes(partial.girtSize)
  ? partial.girtSize
  : '2x6',
- /** Roof purlin lumber: '2x4' | '2x6' | '2x8'. Default 2x4; Kane/SB often 2x6. */
+ /** Roof purlin lumber: '2x4' | '2x6' | '2x8'. Default 2x4; Kane/benchmark often 2x6. */
  purlinSize: ['2x4', '2x6', '2x8'].includes(partial.purlinSize)
  ? partial.purlinSize
  : '2x4',
@@ -455,21 +455,45 @@ export function createBuilding(partial = {}) {
  /** Structural frame overhang (inches). 0 = square eave; metal may still project. */
  overhangIn: partial.overhangIn ?? 0,
  /**
+     * Raised / energy heel above eave (ft). Adds to post ORDER height only
+     * (Doug benchmark heel 2′6″ → eave posts cut 22′, peak jambs 26′).
+     */
+ heelHeightFt: Math.max(0, Number(partial.heelHeightFt) || 0),
+ /**
+     * Main-building ceiling liner (Arctic / Thrifty panels + FJ). 'yes' | 'none'.
+     * Jim benchmark: FJ Arctic ×30 + wall FJ Black ×31.
+     */
+ ceilingLiner:
+  partial.ceilingLiner === true || partial.ceilingLiner === 'yes'
+   ? 'yes'
+   : 'none',
+ /** Trim/panel color for ceiling liner FJ (default AR = Arctic). */
+ ceilingLinerColor: partial.ceilingLinerColor || 'AR',
+ /**
      * Roof panel only overhang past framing (inches). Standard We Build: 3".
      * Used for roof panel length & purlin row count, not post layout.
      */
  metalOverhangIn: partial.metalOverhangIn ?? 3,
  /**
-     * Always 'auto' in the app — SB package from geometry (eave ≥ 14′ or lean → full).
+     * Always 'auto' in the app — benchmark package from geometry (eave ≥ 14′ or lean → full).
      * 'small' | 'full' only for internal regression tests.
      */
  orderPackageMode: ['auto', 'small', 'full'].includes(partial.orderPackageMode)
  ? partial.orderPackageMode
  : 'auto',
+ /**
+     * Mid-gable post stock when required is ~18.1–18.5′:
+     * 'auto' | 'demote18' | 'keep20'. Default auto (width/lean + package rule).
+     * Frank benchmark 35×50 uses keep20 so mid-gable orders 20′ without breaking
+     * 30×40 / 40×40 / 35×55 auto demotion goldens.
+     */
+ midGablePostPolicy: ['auto', 'demote18', 'keep20'].includes(partial.midGablePostPolicy)
+ ? partial.midGablePostPolicy
+ : 'auto',
  wallColor: partial.wallColor || 'AL',
  roofColor: partial.roofColor || 'BK',
  /**
-     * Metal panel gauge for walls / roof. SB & Kane item lists use 29 GA default
+     * Metal panel gauge for walls / roof. benchmark & Kane item lists use 29 GA default
      * or 26 GA upgrade (e.g. 2640BKQLP / 26GLIFE-MATTEBLACK).
      * Values: '29' | '26'
      */

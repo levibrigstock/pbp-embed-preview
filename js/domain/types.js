@@ -479,7 +479,7 @@ export function createBuilding(partial = {}) {
  trimColor: partial.trimColor || 'BK',
  /**
      * Lower wall wainscot color. Empty / 'NONE' = no wainscot.
-     * When set, wainscot band height is wainscotHeightFt.
+     * When set, wainscot band height is wainscotHeightFt (0 = off even if color set).
      */
  wainscotColor: partial.wainscotColor || 'NONE',
  wainscotHeightFt: partial.wainscotHeightFt ?? 3,

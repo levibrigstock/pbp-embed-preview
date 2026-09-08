@@ -944,13 +944,19 @@ export function computeLeanToMaterials(b, lean, dims) {
  const openRight = isLeanFaceOpen(lean, 'rightEnd');
 
  // Main-building wainscot applies to enclosed lean walls only (not open/carport leans)
- const wainOn =
+ const colorOn =
  enclosed &&
  b.wainscotColor &&
  b.wainscotColor !== 'NONE' &&
  String(b.wainscotColor).toUpperCase() !== '';
- const wainH = wainOn
- ? Math.min(Math.max(Number(b.wainscotHeightFt) || 3, 0.5), Math.max(0.5, outerH - 0.5))
+ const rawWain = Number(b.wainscotHeightFt);
+ // Explicit 0 = off even if a color is selected; missing → default 3′
+ const wainH =
+ colorOn && !(Number.isFinite(rawWain) && rawWain <= 0)
+ ? Math.min(
+ Math.max(Number.isFinite(rawWain) && rawWain > 0 ? rawWain : 3, 0.5),
+ Math.max(0.5, outerH - 0.5),
+ )
  : 0;
 
  // --- Girts (enclosed faces only); first row at wainscot when on ---
@@ -1159,10 +1165,14 @@ export function generateGirts(b) {
  String(b.wainscotColor).toUpperCase() !== '';
  let wainH = 0;
  if (wainOn) {
+ const rawWain = Number(b.wainscotHeightFt);
+ // Explicit 0 = off even if a color is selected
+ if (!(Number.isFinite(rawWain) && rawWain <= 0)) {
  wainH = Math.min(
- Math.max(Number(b.wainscotHeightFt) || 3, 0.5),
+ Math.max(Number.isFinite(rawWain) && rawWain > 0 ? rawWain : 3, 0.5),
  Math.max(0.5, eave - 0.5),
  );
+ }
  }
 
  const levelsMain = girtLevelsForHeight(eave, spacingFt, wainH, levelOpts);

@@ -1807,6 +1807,22 @@ export class SceneView {
  }
 
  /** Metal walls + roof (ag panel). Only called when showMetal is true. */
+
+ /**
+  * Effective wainscot band height (ft) for 3D meshes.
+  * Color NONE/empty → 0. Explicit height ≤ 0 → off even if a color is selected.
+  * Missing/NaN height with color on → historic default 3′.
+  */
+ _wainscotHeightFt(b, maxHft) {
+ const color = b?.wainscotColor;
+ if (!color || color === 'NONE' || String(color).toUpperCase() === '') return 0;
+ const raw = Number(b.wainscotHeightFt);
+ if (Number.isFinite(raw) && raw <= 0) return 0;
+ const h = Number.isFinite(raw) && raw > 0 ? raw : 3;
+ const cap = Math.max(0.5, (Number(maxHft) || 12) - 0.5);
+ return Math.min(Math.max(h, 0.5), cap);
+ }
+
  _addBuildingSkin(group, b, W, L, H, rise, oh, wallHex, roofHex) {
  // wall defs: span is wall length along X for front/back, along Z for left/right
  const walls = [
@@ -1816,10 +1832,9 @@ export class SceneView {
  { wall: 'right', span: L, h: H, y: H / 2, x: W - 0.05, axis: 'z', outSign: 1 },
  ];
 
- const hasWainscot = b.wainscotColor && b.wainscotColor !== 'NONE';
- const wainH = hasWainscot
- ? Math.min(Math.max(b.wainscotHeightFt || 3, 0.5), b.eaveHeight - 0.5) * FT
- : 0;
+ const wainHft = this._wainscotHeightFt(b, b.eaveHeight);
+ const hasWainscot = wainHft > 0;
+ const wainH = hasWainscot ? wainHft * FT : 0;
  const wainHex = this._colorFor(b.wainscotColor, 0x1a1a1a);
  // Trim color is independent of roof — resolve explicitly so dropdown changes apply
  const trimCode = b.trimColor || b.roofColor || 'BK';
@@ -3122,16 +3137,9 @@ export class SceneView {
 
  // Wainscot (same visual language as main): full wall metal + proud band + trim strip
  // Enclosed lean only — open/carport leans stay main-structure wainscot only
- const wainOn =
- b.wainscotColor &&
- b.wainscotColor !== 'NONE' &&
- String(b.wainscotColor).toUpperCase() !== '';
- const wainH = wainOn
- ? Math.min(
- Math.max(Number(b.wainscotHeightFt) || 3, 0.5),
- Math.max(0.5, hAtOuter / FT - 0.5),
- ) * FT
- : 0;
+ const wainHft = this._wainscotHeightFt(b, hAtOuter / FT);
+ const wainOn = wainHft > 0;
+ const wainH = wainOn ? wainHft * FT : 0;
  const wainHex = this._colorFor(b.wainscotColor, 0x1a1a1a);
  // Outward normal for outer lean face (proud overlay like main)
  let outNx = 0;

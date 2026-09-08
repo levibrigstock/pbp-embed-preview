@@ -235,7 +235,8 @@ export function validatePublicConfig(input) {
   out.colors.roof = pickEnumWarn(c.roof, PUBLIC_COLOR_CODES, out.colors.roof, 'colors.roof', warnings);
   out.colors.trim = pickEnumWarn(c.trim, PUBLIC_COLOR_CODES, out.colors.trim, 'colors.trim', warnings);
   out.colors.wainscot = pickEnumWarn(c.wainscot, PUBLIC_WAINSCOT_CODES, out.colors.wainscot, 'colors.wainscot', warnings);
-  out.colors.wainscotHeightFt = clampWarn(c.wainscotHeightFt, { min: 1, max: 6 }, out.colors.wainscotHeightFt, 'colors.wainscotHeightFt', warnings);
+  // min 0: height 0 = no wainscot band in 3D even if a color is selected
+  out.colors.wainscotHeightFt = clampWarn(c.wainscotHeightFt, { min: 0, max: 6 }, out.colors.wainscotHeightFt, 'colors.wainscotHeightFt', warnings);
 
   // ── metal gauge ──
   out.metalGauge = pickEnumWarn(

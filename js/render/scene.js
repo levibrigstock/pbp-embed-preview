@@ -1590,7 +1590,7 @@ export class SceneView {
  const aspect = exportW / Math.max(exportH, 1);
  const vFov = THREE.MathUtils.degToRad(this.camera.fov || 38);
  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
- const pad = 1.05; // tight; lower = more zoomed in
+ const pad = 1.18; // comfortable fill: whole barn visible, fills most of frame
  const distToFit = (spanW, spanH) => {
  const dH = (spanH * 0.5) / Math.tan(vFov / 2);
  const dW = (spanW * 0.5) / Math.tan(hFov / 2);

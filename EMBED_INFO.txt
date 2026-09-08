@@ -1,6 +1,5 @@
 PoleBarn Pro — public configurator embed package
-built: 2026-09-08T16:10:00Z
-source: polebarn-pro develop (elevation zoom-in)
-entry: /public/embed.html?companyId=demo
+built: 2026-09-08T16:35:00Z
+source: polebarn-pro develop (comfortable-fill elevation zoom)
 quoteEmailUrl: https://pbp-embed-quote-email.lbrigstock8.workers.dev
-note: tighter FOV-fit Sidewall/Endwall shots; cache-bust v=20260908e
+note: elevation pad 1.18 comfortable fill; cache-bust v=20260908f

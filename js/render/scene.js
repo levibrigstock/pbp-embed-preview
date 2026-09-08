@@ -1578,28 +1578,39 @@ export class SceneView {
  center = box.getCenter(new THREE.Vector3());
  size = box.getSize(new THREE.Vector3());
  }
- const maxDim = Math.max(size.x, size.y, size.z, 24);
- const dist = maxDim * 1.35;
- const eyeY = Math.max(center.y + size.y * 0.22, size.y * 0.45);
- this.controls.target.set(center.x, Math.min(eyeY * 0.85, size.y * 0.55), center.z);
-
- // Match wall naming in publicConfig / scene wall defs:
- // front = -Z, back = +Z, left = -X, right = +X
- const sides = [
- { key: 'front', pos: [center.x, eyeY, center.z - dist] },
- { key: 'back', pos: [center.x, eyeY, center.z + dist] },
- { key: 'left', pos: [center.x - dist, eyeY, center.z] },
- { key: 'right', pos: [center.x + dist, eyeY, center.z] },
- ];
+ // Flat elevation eye height (mid building), not a high 3/4 view.
+ const eyeY = center.y;
+ this.controls.target.set(center.x, center.y, center.z);
 
  // Cap export size relative to the on-screen canvas so Safari lite stays happy.
  const exportW = Math.min(maxW, Math.max(320, Math.floor(prevSize.x) || maxW));
  const exportH = Math.min(maxH, Math.max(240, Math.floor(prevSize.y) || maxH));
 
+ // FOV-fit so each wall nearly fills the frame (old maxDim*1.35 was way too far).
+ const aspect = exportW / Math.max(exportH, 1);
+ const vFov = THREE.MathUtils.degToRad(this.camera.fov || 38);
+ const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+ const pad = 1.05; // tight; lower = more zoomed in
+ const distToFit = (spanW, spanH) => {
+ const dH = (spanH * 0.5) / Math.tan(vFov / 2);
+ const dW = (spanW * 0.5) / Math.tan(hFov / 2);
+ return Math.max(dH, dW, 6) * pad;
+ };
+ // Endwalls (front/back) frame width×height; sidewalls (left/right) frame length×height.
+ const distEnd = distToFit(size.x, size.y);
+ const distSide = distToFit(size.z, size.y);
+ // Match wall naming: front=-Z, back=+Z, left=-X, right=+X
+ const sides = [
+ { key: 'front', pos: [center.x, eyeY, center.z - distEnd] },
+ { key: 'back', pos: [center.x, eyeY, center.z + distEnd] },
+ { key: 'left', pos: [center.x - distSide, eyeY, center.z] },
+ { key: 'right', pos: [center.x + distSide, eyeY, center.z] },
+ ];
+
  try {
  this.renderer.setPixelRatio(1);
  this.renderer.setSize(exportW, exportH, false);
- this.camera.aspect = exportW / Math.max(exportH, 1);
+ this.camera.aspect = aspect;
  this.camera.updateProjectionMatrix();
 
  for (const side of sides) {

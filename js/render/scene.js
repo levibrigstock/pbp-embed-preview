@@ -2131,9 +2131,11 @@ export class SceneView {
  });
 
  // ── Shared trim dimensions (ft) ──
- const out = 0.17; // building-line → outer face of trim (proud of ~0.03' wall outer)
- const T = 0.09; // formed-metal thickness
- const leg = 0.4; // corner leg width on each wall face (~4¾")
+ // Wall metal outer ≈ building-line ± 0.03'. Inner face of corner must
+ // overlap that metal (out - T ≤ 0.03) or a dark slit shows at every corner.
+ const out = 0.14; // building-line → outer face of trim
+ const T = 0.13; // thick enough that out - T ≈ 0.01 (laps wall metal)
+ const leg = 0.45; // corner leg width on each wall face
  const eaveBandH = 0.36; // vertical depth of top-of-wall / gable wall-face band
  const fasciaH = 0.34; // drip fascia vertical face (eave + gable rake)
  const lipThk = 0.06;
@@ -2141,9 +2143,10 @@ export class SceneView {
  // Eave band / fascia top sits just under roof plane
  const bandTop = H - nest;
  const bandMidY = bandTop - eaveBandH * 0.5;
- // Corner: slight bury to match wall-panel grade bury, top flush with eave band
+ // Corner: bury at grade; top tucks under/into eave band (no hairline gap)
  const cornerBot = -0.08;
- const cornerH = bandTop - cornerBot;
+ const cornerTop = bandTop + 0.04;
+ const cornerH = cornerTop - cornerBot;
  const cornerMidY = cornerBot + cornerH * 0.5;
 
  // Small helpers: outer-face center of a trim strip of thickness T
@@ -2218,7 +2221,8 @@ export class SceneView {
  // ── Eave package (left & right) ──
  // Band length stops at corner legs so the L-corner reads cleanly; fascia/pan
  // run full drip length (past gables) for continuous roof-edge metal.
- const bandLen = Math.max(1, L - 2 * leg + T); // meets corner legs with tiny overlap
+ // Overlap well into corner legs so no light gap at the join
+ const bandLen = Math.max(1, L - 2 * leg + T * 3);
  const dripLen = L + oh * 2 + T;
  for (const side of [-1, 1]) {
  const wallName = side < 0 ? 'left' : 'right';
@@ -2286,7 +2290,7 @@ export class SceneView {
  // ── 1) Wall-face rake band (matches eave top-of-wall band) ──
  // Starts at corner leg, runs to just shy of peak so peak join sits clean.
  if (!isWallOpen(b, end.wall)) {
- const x0 = side < 0 ? leg - T * 0.4 : W - (leg - T * 0.4);
+ const x0 = side < 0 ? leg - T * 1.2 : W - (leg - T * 1.2);
  const x1 = xRidge + (side < 0 ? -0.06 : 0.06);
  const run = Math.abs(x1 - x0);
  const bandLen = Math.hypot(run, rise * (run / Math.max(W / 2, 0.01)));
@@ -2808,8 +2812,15 @@ export class SceneView {
  _mountOpeningVisual(group, b, o, opts) {
  const selected = o.id === this.selectedOpeningId;
  const w = Math.max(0.5, Number(o.width) || 3) * FT;
- const h = Math.max(0.5, Number(o.height) || 7) * FT;
+ let h = Math.max(0.5, Number(o.height) || 7) * FT;
  const type = o.type || 'walk';
+ // Keep opening top under the eave/roof trim band (~0.45' clearance)
+ const sillFt = Math.max(0, Number(o.sillHeight) || 0);
+ const eaveFt = Math.max(6, Number(b.eaveHeight) || 12);
+ const maxTopFt = eaveFt - 0.45;
+ if (sillFt + h / FT > maxTopFt) {
+ h = Math.max(0.5, maxTopFt - sillFt) * FT;
+ }
  const trimHex = this._colorFor(b.trimColor || b.roofColor || 'BK', 0xf2f0ea);
 
  const g = new THREE.Group();

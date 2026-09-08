@@ -275,6 +275,21 @@ export function validatePublicConfig(input) {
         return demoteOpeningToMain(shaped);
       }
     }
+    // Keep opening top under eave/roof trim (~0.45' clearance for eave band)
+    const eaveFt =
+      shaped.host !== 'main' && leanById.get(shaped.host)?.eaveHeight != null
+        ? Number(leanById.get(shaped.host).eaveHeight)
+        : Number(out.building.eaveHeight) || 12;
+    const maxTop = eaveFt - 0.45;
+    const sill = Number(shaped.sillHeight) || 0;
+    const top = sill + (Number(shaped.height) || 0);
+    if (top > maxTop) {
+      const nextH = Math.max(0.5, maxTop - sill);
+      warnings.push(
+        `opening ${shaped.id}: height clamped ${shaped.height}' → ${nextH}' so it stays under the eave trim.`,
+      );
+      shaped.height = nextH;
+    }
     return shaped;
   });
 

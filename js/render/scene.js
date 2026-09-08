@@ -1617,7 +1617,7 @@ export class SceneView {
  const aspect = exportW / Math.max(exportH, 1);
  const vFov = THREE.MathUtils.degToRad(this.camera.fov || 38);
  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
- const pad = 1.15;
+ const pad = 1.28; // slight zoom-out so overhang/trim isn't clipped
  const distToFit = (spanW, spanH) => {
  const dH = (spanH * 0.5) / Math.tan(vFov / 2);
  const dW = (spanW * 0.5) / Math.tan(hFov / 2);

@@ -1,0 +1,9 @@
+{
+  "__comment": "GitHub Pages phone preview — quote email worker (no secrets).",
+  "demo": {
+    "quoteEmailUrl": "https://pbp-embed-quote-email.lbrigstock8.workers.dev"
+  },
+  "default": {
+    "quoteEmailUrl": "https://pbp-embed-quote-email.lbrigstock8.workers.dev"
+  }
+}

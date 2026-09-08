@@ -1,8 +1,9 @@
 PoleBarn Pro — public configurator embed package
-built: 2026-09-08T13:22:05Z
+built: 2026-09-08T15:15:09Z
+source: polebarn-pro develop @ 8a6d724
 entry: /public/embed.html?companyId=demo
+quoteEmailUrl: https://pbp-embed-quote-email.lbrigstock8.workers.dev
 pack:  scripts/pack-embed.sh
 docs:  EMBED_HOSTING.md (repo root)
-note:  copy public/lead-config.example.json → public/lead-config.json for webhooks
-note:  copy public/company-config.example.json → public/company-config.json for branding
+note:  public/lead-config.json points at live quote-email worker
 exclude: main app, takeoff, CRM, catalog, reference PDFs

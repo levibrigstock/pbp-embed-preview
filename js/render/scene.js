@@ -1632,6 +1632,11 @@ export class SceneView {
  { key: 'right', pos: [center.x + distSide, eyeY, center.z] },
  ];
 
+ // Hide Front/Side/Eave/pitch dim tags for clean quote photos (viewer keeps them).
+ const labelSprites = this._labelSprites || [];
+ const labelVis = labelSprites.map((s) => s.visible);
+ for (const s of labelSprites) s.visible = false;
+
  try {
  // 2× pixel ratio for sharper PNGs on phone without huge payloads.
  this.renderer.setPixelRatio(2);
@@ -1659,6 +1664,9 @@ export class SceneView {
  await new Promise((r) => requestAnimationFrame(r));
  }
  } finally {
+ for (let i = 0; i < labelSprites.length; i++) {
+ labelSprites[i].visible = labelVis[i];
+ }
  this.camera.position.copy(prevCamPos);
  this.controls.target.copy(prevTarget);
  this.controls.autoRotate = prevAuto;

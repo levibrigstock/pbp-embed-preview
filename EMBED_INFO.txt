@@ -1,3 +1,1 @@
-PoleBarn Pro embed — barn-framed sharp elevations (pbp develop)
-cache-bust v=20260908g
-quoteEmailUrl: https://pbp-embed-quote-email.lbrigstock8.workers.dev
+PoleBarn Pro embed — clean elevations (no dim tags) v=20260908h

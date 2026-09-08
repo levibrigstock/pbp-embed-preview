@@ -127,10 +127,13 @@ export function girtPackMode(b) {
 
 /**
  * Whether girt elevations include the eave station.
- * SB with any lean (even open carport) still nails an eave girt row on the main building.
+ * Full package / enclosed lean / long plain (L ≥ 80′) nail an eave row.
+ * Open carport leans do NOT (Prater open lean matches plain 30×40 → 35@20′).
  */
 export function girtIncludeEaveNailer(b) {
-  return useFullGirtPackage(b) || hasAnyLean(b);
+  // Long plain shops (L ≥ 80′) still get an eave girt row in SB (Harr 40×80 → 68@20′).
+  const L = Number(b?.length) || 0;
+  return useFullGirtPackage(b) || hasEnclosedLean(b) || L >= 80;
 }
 
 /** Waste: +1 board on large per-wall packages. */
@@ -165,6 +168,23 @@ export function purlinStationPad(b) {
   const metalIn = Number(b?.metalOverhangIn);
   const m = Number.isFinite(metalIn) && metalIn > 0 ? metalIn : PANEL_METAL_DRIP_MIN_IN;
   return m >= 6 ? 2 : 1;
+}
+
+/**
+ * Purlin stations per roof slope.
+ * Horizontal half-run for pitch < 6 (locks 30×40 / 40×40 / 60×60).
+ * Along-slope run for pitch ≥ 6 (SB Harr 40×80×12 6/12 → 13/side).
+ */
+export function purlinRowsPerSide(b) {
+  const spacingFt = (Number(b?.purlinSpacingIn) || 24) / 12;
+  const metalOh = panelMetalOverhangIn(b) / 12;
+  const frameOh = (Number(b?.overhangIn) || 0) / 12;
+  const halfRun = (Number(b?.width) || 0) / 2 + metalOh + frameOh;
+  const pitch = Number(b?.pitch) || 4;
+  const stationRun =
+    pitch >= 6 ? halfRun * Math.sqrt(1 + (pitch / 12) ** 2) : halfRun;
+  const pad = purlinStationPad(b);
+  return Math.max(2, Math.ceil(stationRun / spacingFt - 1e-9) + pad);
 }
 
 /**
@@ -218,6 +238,27 @@ export function packPurlinRun(runLenFt) {
 }
 
 /**
+ * Open / broken-pitch lean purlin pack: one 16′ lead then 12′ fill.
+ * 40′ → 16+12+12 (not 16+16+12). Enclosed same-pitch leans keep packPurlinRun.
+ */
+export function packLeanOpenPurlinRun(runLenFt) {
+  const counts = {};
+  let rem = Math.max(0, Number(runLenFt) || 0);
+  if (rem < 0.01) return counts;
+  // One 16′ lead, then 12′ fill only (40′ → 16+12+12, not 16+16+12).
+  if (rem >= 16) {
+    counts[16] = 1;
+    rem = Math.round((rem - 16) * 1000) / 1000;
+  }
+  while (rem > 0.01) {
+    counts[12] = (counts[12] || 0) + 1;
+    rem = Math.round((rem - 12) * 1000) / 1000;
+    if (rem < 0) rem = 0;
+  }
+  return counts;
+}
+
+/**
  * End remainder after max full 16′ boards on a run (0 if exact or rem handled as extra 16).
  * Used for staggered upgrade gate: 56′ → 8′, 36′ → 4′, 76′ → 12′.
  */
@@ -262,28 +303,41 @@ export function purlinStaggerUpgradeCount(mainRows, runLenFt) {
  *
  * @returns {{ 16: number, 12: number }}
  */
-export function packMainPurlinBoards(mainRows, buildingLengthFt) {
+export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
   const rows = Math.max(0, Number(mainRows) || 0);
   const L = Number(buildingLengthFt) || 0;
   const run = purlinMainRunLengthFt(L);
   const counts = { 16: 0, 12: 0 };
   if (rows <= 0 || run < 0.1) return counts;
 
-  const one = packPurlinRun(run);
+  // Steep plain shops on multiple-of-16 lengths: SB stocks full-L 16′ boards
+  // (Harr 80′ → 5×16/row = 130@16, not 4×16+12 on the 76′ inset run).
+  const pitch = Number(b?.pitch) || 0;
+  const fullLPack =
+    !!b &&
+    pitch >= 6 &&
+    !hasAnyLean(b) &&
+    L >= 80 &&
+    Math.abs(L % 16) < 1e-9;
+  const packRun = fullLPack ? L : run;
+
+  const one = packPurlinRun(packRun);
   counts[16] = (one[16] || 0) * rows;
   counts[12] = (one[12] || 0) * rows;
 
-  const up = purlinStaggerUpgradeCount(rows, run);
+  const up = fullLPack ? 0 : purlinStaggerUpgradeCount(rows, packRun);
   if (up > 0) {
     const can = Math.min(up, counts[12]);
     counts[12] -= can;
     counts[16] += can;
   }
 
-  const mid12 = purlinMidLength12StubCount(rows, L);
+  const mid12 = fullLPack ? 0 : purlinMidLength12StubCount(rows, L);
   if (mid12 > 0) counts[12] += mid12;
 
-  const long12 = purlinExtra12StubCount(rows, L);
+  let long12 = purlinExtra12StubCount(rows, L);
+  // Harr-class: 26 rows × full 80′ → 130@16 needs 10×12′ end/ridge stubs (ceil(L/8)).
+  if (fullLPack) long12 = Math.max(long12, Math.ceil(L / 8));
   if (long12 > 0) counts[12] += long12;
 
   return counts;
@@ -417,13 +471,16 @@ export function gableStockAboveRakeFt(b = null) {
 }
 
 /**
- * Ladder step for gable wall packing (inches). Half-foot when peak was
- * snapped to 20′ (SB 19′6″ / 18′6″… steps); otherwise 12″ (30/40 goldens).
+ * Ladder step for gable wall packing (inches).
+ * Kane peak-snap → 6″. Otherwise match roof-line drop per 3′ bay:
+ * coverage × pitch (4/12 → 12″, 6/12 → 18″). SB Harr uses 18″ steps.
  */
 export function gablePanelLadderInches(b) {
   const geo = gableGeometricPeakFt(b);
   const minPeak = roundToNearestInch(geo + GABLE_STOCK_ABOVE_RAKE_IN / 12);
-  return minPeak >= 18.5 - 1e-9 && minPeak < 19 - 1e-9 ? 6 : 12;
+  if (minPeak >= 18.5 - 1e-9 && minPeak < 19 - 1e-9) return 6;
+  const pitch = Number(b?.pitch) || 4;
+  return Math.max(6, Math.round(PANEL_COVERAGE_FT * pitch));
 }
 
 export function eaveWallPanelHeightFt(b) {
@@ -446,9 +503,13 @@ export const TRIM_STOCK_FT = 10;
  * L ≥ 60′ → +2 (Levi 80′: ridge 10, eave edge 18).
  * L < 60′ → +1 (30×40: ridge 5, eave edge 9).
  */
-export function trimRunExtraPieces(buildingLengthFt) {
+export function trimRunExtraPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
-  return L >= 60 ? 2 : 1;
+  if (L < 60) return 1;
+  // Full / lean production: +2 (Levi 80′ → ridge 10, eave 18).
+  // Plain small-shop long: +1 (Harr 80′ → ridge 9, eave 17).
+  if (b && !useFullGirtPackage(b) && !hasAnyLean(b)) return 1;
+  return 2;
 }
 
 /**
@@ -460,7 +521,7 @@ export function trimRunExtraPieces(buildingLengthFt) {
 export function ridgeCapPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   const stock = TRIM_STOCK_FT;
-  let n = Math.max(1, Math.ceil(L / stock - 1e-9) + trimRunExtraPieces(L));
+  let n = Math.max(1, Math.ceil(L / stock - 1e-9) + trimRunExtraPieces(L, b));
   // Gable lean ridge runs out from main wall — order +1 stock per lean (SB)
   if (b) n += gableLeanCount(b);
   return n;
@@ -478,8 +539,29 @@ export function ridgeCapPieces(buildingLengthFt, b = null) {
 export function eaveTrimPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   const stock = TRIM_STOCK_FT;
-  let n = Math.max(1, Math.ceil((2 * L) / stock - 1e-9) + trimRunExtraPieces(L));
+  let n = Math.max(1, Math.ceil((2 * L) / stock - 1e-9) + trimRunExtraPieces(L, b));
   if (b && gableLeanCount(b) > 0) n += 1;
+  // Open shed lean outer eave drip is ordered as LET (Prater 40′ → +5 → 14).
+  // Enclosed shed leans drain at the main eave / dual-wing pack — no add.
+  if (b) {
+    for (const lt of b.leanTos || []) {
+      if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
+      if (lt.enclosed !== false && lt.enclosure !== 'open') continue;
+      if ((lt.roofStyle || 'shed') === 'gable') continue;
+      const wall = lt.wall || 'right';
+      const wallLen =
+        wall === 'left' || wall === 'right'
+          ? Number(b.length) || 0
+          : Number(b.width) || 0;
+      const offset = Number(lt.offset) || 0;
+      const leanLen =
+        Number(lt.length) > 0
+          ? Math.min(Number(lt.length) || 0, Math.max(0, wallLen - offset))
+          : Math.max(0, wallLen - offset);
+      if (leanLen <= 0.1) continue;
+      n += Math.max(1, Math.ceil(leanLen / stock - 1e-9) + 1);
+    }
+  }
   return n;
 }
 
@@ -568,12 +650,9 @@ export function describePolicyForBuilding(b) {
   const metal = panelMetalOverhangIn(b);
   const L = Number(b?.length) || 0;
   // rows estimate for audit (matches generatePurlins when spacing 24")
-  const spacingFt = (Number(b?.purlinSpacingIn) || 24) / 12;
-  const frameOh = (Number(b?.overhangIn) || 0) / 12;
-  const halfRun = (Number(b?.width) || 0) / 2 + metal / 12 + frameOh;
-  const rps = Math.max(2, Math.ceil(halfRun / spacingFt - 1e-9) + pad);
+  const rps = purlinRowsPerSide(b);
   const sides = (b?.roofStyle || 'gable') === 'mono' ? 1 : 2;
-  const purlinPack = packMainPurlinBoards(rps * sides, L);
+  const purlinPack = packMainPurlinBoards(rps * sides, L, b);
   const run = purlinMainRunLengthFt(L);
   return {
     orderPackageMode: mode,

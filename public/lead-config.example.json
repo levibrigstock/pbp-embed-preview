@@ -1,12 +1,15 @@
 {
-  "__comment": "Copy this file to public/lead-config.json (gitignored) to route embed leads per company. Keyed by the ?companyId= value in the embed URL; 'default' is used when no companyId matches. webhookUrl must be an absolute https URL (a Zapier/Make/GoHighLevel catch hook, or your own /api/lead proxy). Do NOT commit real webhook URLs.",
+  "__comment": "Copy to public/lead-config.json (gitignored). webhookUrl = CRM/Zapier JSON (no images). quoteEmailUrl = Cloudflare Worker (workers/embed-quote-email) that emails support@ with elevation PNGs. Do NOT commit real URLs or API keys.",
   "demo": {
-    "webhookUrl": "https://hooks.zapier.com/hooks/catch/0000000/abcdefg/"
+    "webhookUrl": "https://hooks.zapier.com/hooks/catch/0000000/abcdefg/",
+    "quoteEmailUrl": "https://pbp-embed-quote-email.YOUR_ACCOUNT.workers.dev"
   },
   "acmebarns": {
-    "webhookUrl": "https://hook.us1.make.com/xxxxxxxxxxxxxxxxxxxxxxxx"
+    "webhookUrl": "https://hook.us1.make.com/xxxxxxxxxxxxxxxxxxxxxxxx",
+    "quoteEmailUrl": "https://pbp-embed-quote-email.YOUR_ACCOUNT.workers.dev"
   },
   "default": {
-    "webhookUrl": "https://example.com/replace-with-your-webhook"
+    "webhookUrl": "https://example.com/replace-with-your-webhook",
+    "quoteEmailUrl": "https://pbp-embed-quote-email.YOUR_ACCOUNT.workers.dev"
   }
 }

@@ -1476,6 +1476,97 @@ export class SceneView {
  });
  }
 
+ /**
+ * Capture clear elevation PNGs of all four sides (front/back/left/right).
+ * Phone-safe: uses the live WebGL canvas via toDataURL at a capped size
+ * (no 1920 download path). Restores camera + orbit afterward.
+ *
+ * @param {{ maxWidth?: number, maxHeight?: number }} [opts]
+ * @returns {Promise<{ front?: string, back?: string, left?: string, right?: string }>}
+ *   data URLs keyed by wall; empty object when WebGL is unavailable.
+ */
+ async captureElevationShots(opts = {}) {
+ const out = {};
+ if (!this.webglOk || !this.renderer || !this.camera || !this.controls) {
+ return out;
+ }
+
+ const maxW = Math.max(320, Math.min(opts.maxWidth || 1024, 1280));
+ const maxH = Math.max(240, Math.min(opts.maxHeight || 640, 800));
+ const prevCamPos = this.camera.position.clone();
+ const prevTarget = this.controls.target.clone();
+ const prevAuto = !!this.controls.autoRotate;
+ const prevSize = new THREE.Vector2();
+ this.renderer.getSize(prevSize);
+ const prevPr = this.renderer.getPixelRatio();
+ const prevAspect = this.camera.aspect;
+
+ // Pause auto-orbit while we lock each elevation.
+ this.controls.autoRotate = false;
+
+ const box = new THREE.Box3().setFromObject(this.root);
+ let center = new THREE.Vector3(20, 8, 30);
+ let size = new THREE.Vector3(40, 16, 50);
+ if (!box.isEmpty()) {
+ center = box.getCenter(new THREE.Vector3());
+ size = box.getSize(new THREE.Vector3());
+ }
+ const maxDim = Math.max(size.x, size.y, size.z, 24);
+ const dist = maxDim * 1.35;
+ const eyeY = Math.max(center.y + size.y * 0.22, size.y * 0.45);
+ this.controls.target.set(center.x, Math.min(eyeY * 0.85, size.y * 0.55), center.z);
+
+ // Match wall naming in publicConfig / scene wall defs:
+ // front = -Z, back = +Z, left = -X, right = +X
+ const sides = [
+ { key: 'front', pos: [center.x, eyeY, center.z - dist] },
+ { key: 'back', pos: [center.x, eyeY, center.z + dist] },
+ { key: 'left', pos: [center.x - dist, eyeY, center.z] },
+ { key: 'right', pos: [center.x + dist, eyeY, center.z] },
+ ];
+
+ // Cap export size relative to the on-screen canvas so Safari lite stays happy.
+ const exportW = Math.min(maxW, Math.max(320, Math.floor(prevSize.x) || maxW));
+ const exportH = Math.min(maxH, Math.max(240, Math.floor(prevSize.y) || maxH));
+
+ try {
+ this.renderer.setPixelRatio(1);
+ this.renderer.setSize(exportW, exportH, false);
+ this.camera.aspect = exportW / Math.max(exportH, 1);
+ this.camera.updateProjectionMatrix();
+
+ for (const side of sides) {
+ this.camera.position.set(side.pos[0], side.pos[1], side.pos[2]);
+ this.controls.update();
+ this.renderer.render(this.scene, this.camera);
+ // Prefer the WebGL drawing buffer (works on iPhone Safari lite).
+ let dataUrl = '';
+ try {
+ dataUrl = this.renderer.domElement.toDataURL('image/png');
+ } catch (err) {
+ console.warn('[scene] elevation toDataURL failed', side.key, err);
+ }
+ if (dataUrl && dataUrl.startsWith('data:image')) {
+ out[side.key] = dataUrl;
+ }
+ // Yield so Safari can keep the page responsive between shots.
+ await new Promise((r) => requestAnimationFrame(r));
+ }
+ } finally {
+ this.camera.position.copy(prevCamPos);
+ this.controls.target.copy(prevTarget);
+ this.controls.autoRotate = prevAuto;
+ this.controls.update();
+ this.renderer.setPixelRatio(prevPr);
+ this.renderer.setSize(prevSize.x, prevSize.y, false);
+ this.camera.aspect = prevAspect;
+ this.camera.updateProjectionMatrix();
+ this.renderer.render(this.scene, this.camera);
+ }
+
+ return out;
+ }
+
  /* ───────────── Building mesh ───────────── */
 
  _siteMatrix(b) {

@@ -10,13 +10,14 @@
  *                  ──▶  publicConfigToBuildingPartial()
  *                  ──▶  createProject() / SceneView  (viewer only)
  *
- * "Request a quote" collects name / phone / email and bundles them with the
- * public config. handoffLead() always keeps a console + localStorage copy
- * (`polebarnpro:leads:<companyId>`) and, when a host page asked for it, posts the
- * record to `window.parent`. When a lead webhook is configured (query
- * `leadWebhook`, `window.__PBP_LEAD_WEBHOOK__`, or a bundled
- * `public/lead-config.json` keyed by companyId) it also POSTs the JSON record to
- * that endpoint and the dialog only reports success once the POST resolves.
+ * "Request a quote" collects name / phone / email / zip and bundles them with
+ * the public config plus four elevation screenshots (front/back/left/right).
+ * handoffLead() always keeps a console + localStorage copy
+ * (`polebarnpro:leads:<companyId>`, without image payloads) and, when a host
+ * page asked for it, posts the record to `window.parent`. When a quote-email
+ * endpoint is configured it POSTs specs + PNG attachments to email
+ * support@webuild-structures.com (Cloudflare Worker + Resend). An optional
+ * lead webhook (CRM) still receives the JSON record without images.
  *
  * Per-company chrome (title, brand strip, optional logo / accent) comes from
  * `public/company-config.json` keyed by companyId — see resolveCompanyBranding().
@@ -62,8 +63,9 @@ let rebuildTimer = 0;
 let placeDraft = null;
 let dragListTimer = 0;
 
-/** Filled lazily by resolveLeadWebhook / resolveCompanyBranding (must be above init()). */
+/** Filled lazily by resolveLeadWebhook / resolveQuoteEmail / resolveCompanyBranding (must be above init()). */
 let leadWebhookLookup;
+let quoteEmailLookup;
 let companyBrandingLookup;
 
 init().catch((err) => {
@@ -120,7 +122,9 @@ async function init() {
         get config() { return config; },
         resolveLeadWebhook, // Promise<string|null> — check which endpoint is live
         resolveCompanyBranding, // Promise<branding> — displayName / logoUrl / accent
-        buildLeadRecord: () => buildLeadRecord({ name: 'Test', phone: '000', email: 't@t' }),
+        buildLeadRecord: () => buildLeadRecord({ name: 'Test', phone: '000', email: 't@t', zip: '12345' }),
+        captureElevations: () => captureElevationShots(),
+        resolveQuoteEmail,
       };
     }
   } catch (err) {
@@ -148,7 +152,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260907g');
+    const { SceneView } = await import('../render/scene.js?v=20260908a');
     // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,
@@ -650,6 +654,77 @@ function renderOpeningList() {
 
 /* ─────────────────────── request quote (lead handoff) ─────────────────────── */
 
+/** US ZIP: 12345 or 12345-6789 */
+function isValidZip(zip) {
+  return /^\d{5}(-\d{4})?$/.test(String(zip || '').trim());
+}
+
+/**
+ * Capture four elevation PNGs from the live viewer (phone-safe toDataURL).
+ * Returns {} when WebGL is unavailable — quote still proceeds without images.
+ */
+async function captureElevationShots() {
+  if (!scene?.webglOk || typeof scene.captureElevationShots !== 'function') {
+    return {};
+  }
+  try {
+    return (await scene.captureElevationShots({ maxWidth: 1024, maxHeight: 640 })) || {};
+  } catch (err) {
+    console.warn('[embed] elevation capture failed', err);
+    return {};
+  }
+}
+
+/** Specs summary for email body / CRM paste (no prices). */
+function formatBuildingSpecs(publicConfig) {
+  const b = publicConfig?.building || {};
+  const c = publicConfig?.colors || {};
+  const lines = [
+    `Size: ${b.width}' W × ${b.length}' L × ${b.eaveHeight}' eave`,
+    `Roof: ${b.roofStyle || 'gable'} · ${b.pitch}/12 pitch`,
+    `Colors: wall ${c.wall || '—'} · roof ${c.roof || '—'} · trim ${c.trim || '—'}`,
+    `Metal gauge: ${publicConfig?.metalGauge || '—'}`,
+  ];
+  const concrete = publicConfig?.concrete;
+  if (concrete?.enabled) {
+    lines.push(`Concrete slab: yes · ${concrete.thicknessIn || 4}"`);
+  } else {
+    lines.push('Concrete slab: no');
+  }
+  const leans = Array.isArray(publicConfig?.leanTos) ? publicConfig.leanTos : [];
+  if (leans.length) {
+    lines.push(
+      'Lean-tos: ' +
+        leans
+          .map(
+            (lt) =>
+              `${lt.wall} ${lt.depth}' deep` +
+              (lt.length ? ` × ${lt.length}'` : '') +
+              (lt.enclosed ? ' enclosed' : ' open'),
+          )
+          .join('; '),
+    );
+  } else {
+    lines.push('Lean-tos: none');
+  }
+  const openings = Array.isArray(publicConfig?.openings) ? publicConfig.openings : [];
+  if (openings.length) {
+    lines.push(
+      'Openings: ' +
+        openings
+          .map(
+            (o) =>
+              `${o.type || 'opening'} ${o.width}'×${o.height}' on ${o.wall}` +
+              (o.offset != null ? ` @ ${o.offset}'` : ''),
+          )
+          .join('; '),
+    );
+  } else {
+    lines.push('Openings: none');
+  }
+  return lines.join('\n');
+}
+
 function bindQuoteDialog() {
   const dlg = $('quoteDialog');
   let pendingRecord = null;
@@ -679,7 +754,7 @@ function bindQuoteDialog() {
     if (actions) actions.hidden = false;
   }
 
-  function showCopyLeadUi({ keepOpen, hint }) {
+  function showCopyLeadUi({ keepOpen, hint, hintText }) {
     const handoff = $('quoteHandoff');
     if (!handoff) return;
     handoff.hidden = false;
@@ -688,6 +763,7 @@ function bindQuoteDialog() {
       hintEl.hidden = !hint;
       if (hint) {
         hintEl.textContent =
+          hintText ||
           'Paste into Pole Barn Pro → Website Leads → Paste JSON.';
       }
     }
@@ -763,34 +839,64 @@ function bindQuoteDialog() {
       name: $('leadName').value.trim(),
       phone: $('leadPhone').value.trim(),
       email: $('leadEmail').value.trim(),
+      zip: $('leadZip').value.trim(),
     };
-    if (!lead.name || !lead.phone || !lead.email) return;
+    if (!lead.name || !lead.phone || !lead.email || !lead.zip) return;
+    if (!isValidZip(lead.zip)) {
+      const zipEl = $('leadZip');
+      if (zipEl) {
+        zipEl.setCustomValidity('Enter a valid US zip (12345 or 12345-6789).');
+        zipEl.reportValidity();
+        zipEl.setCustomValidity('');
+      }
+      return;
+    }
 
-    const record = buildLeadRecord(lead);
-    pendingRecord = record;
     $('quoteSent').hidden = true;
     $('quoteError').hidden = true;
     const handoff = $('quoteHandoff');
     if (handoff) handoff.hidden = true;
     submitBtn.disabled = true;
+    submitBtn.textContent = 'Capturing views…';
+
+    let elevations = {};
+    try {
+      elevations = await captureElevationShots();
+    } catch (_) {
+      elevations = {};
+    }
+
+    const record = buildLeadRecord(lead);
+    pendingRecord = record;
     submitBtn.textContent = 'Sending…';
 
     try {
-      const result = await handoffLead(record);
+      const result = await handoffLead(record, elevations);
       $('quoteSent').hidden = false;
+      const emailed = !!(result && result.email);
       const usedWebhook = !!(result && result.webhook);
-      if (!usedWebhook) {
+      if (emailed || usedWebhook) {
+        showCopyLeadUi({ keepOpen: false, hint: false });
+      } else {
         const formFields = $('quoteFormFields');
         if (formFields) formFields.hidden = true;
         const actions = $('quoteFormActions');
         if (actions) actions.hidden = true;
-        showCopyLeadUi({ keepOpen: true, hint: true });
-      } else {
-        showCopyLeadUi({ keepOpen: false, hint: false });
+        showCopyLeadUi({
+          keepOpen: true,
+          hint: true,
+          hintText: result?.emailSkipped
+            ? 'Quote saved on this device. Email delivery needs the quote-email endpoint (see PR / EMBED_HOSTING). Copy JSON for Website Leads.'
+            : 'Paste into Pole Barn Pro → Website Leads → Paste JSON.',
+        });
       }
     } catch (err) {
-      console.warn('[embed] lead webhook delivery failed', err);
+      console.warn('[embed] quote delivery failed', err);
       $('quoteError').hidden = false;
+      const formFields = $('quoteFormFields');
+      if (formFields) formFields.hidden = true;
+      const actions = $('quoteFormActions');
+      if (actions) actions.hidden = true;
       showCopyLeadUi({ keepOpen: true, hint: true });
     } finally {
       submitBtn.disabled = false;
@@ -807,8 +913,14 @@ function buildLeadRecord(lead) {
     submittedAt: new Date().toISOString(),
     source: 'public-configurator-embed',
     pageUrl: location.href,
-    lead,
+    lead: {
+      name: lead.name,
+      phone: lead.phone,
+      email: lead.email,
+      zip: lead.zip,
+    },
     publicConfig: clean, // guaranteed free of price / SKU / takeoff / CRM fields
+    specsText: formatBuildingSpecs(clean),
   };
 }
 
@@ -817,17 +929,14 @@ function buildLeadRecord(lead) {
  *
  * Always: console.log + append to localStorage `polebarnpro:leads:<companyId>` +
  * (when `?parentOrigin=` is set and we are iframed) postMessage to the host page.
+ * Elevation PNGs are NEVER written to localStorage (quota) or postMessage.
  *
+ * When a quote-email endpoint is configured (see resolveQuoteEmail), POST the
+ * record + elevation data URLs so the worker can email support@ with attachments.
  * When a lead webhook is configured (see resolveLeadWebhook), also POST the JSON
- * `record` to it. The returned promise rejects if that POST fails so the dialog
- * can show a retry banner — the local copies above are already written.
- *
- * Transports do not change the payload shape (`record`). A future first-party
- * `/api/lead` Lambda (see aws/lambda/) would be just another webhook URL here: it
- * would resolve `companyId` to a tenant CRM server-side and re-run
- * validatePublicConfig() on `record.publicConfig` before trusting it.
+ * record (no images) for CRM / Zapier.
  */
-async function handoffLead(record) {
+async function handoffLead(record, elevations = {}) {
   console.log('[embed] LEAD:', record);
   try {
     const prev = JSON.parse(localStorage.getItem(LEADS_KEY) || '[]');
@@ -837,7 +946,6 @@ async function handoffLead(record) {
     console.warn('[embed] could not store lead locally', err);
   }
 
-  // Best-effort notify a host page if we are iframed and it asked for messages.
   const parentOrigin = params.get('parentOrigin');
   if (parentOrigin && window.parent && window.parent !== window) {
     try {
@@ -847,16 +955,51 @@ async function handoffLead(record) {
     }
   }
 
-  const endpoint = await resolveLeadWebhook();
-  if (!endpoint) return { webhook: false }; // local + postMessage only
+  const result = { webhook: false, email: false, emailSkipped: false };
 
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(record),
-  });
-  if (!res.ok) throw new Error(`Lead webhook responded ${res.status}`);
-  return { webhook: true };
+  const emailEndpoint = await resolveQuoteEmail();
+  const webhookEndpoint = await resolveLeadWebhook();
+
+  if (emailEndpoint) {
+    const elevationKeys = ['front', 'back', 'left', 'right'].filter(
+      (k) => elevations && typeof elevations[k] === 'string' && elevations[k].startsWith('data:image'),
+    );
+    const payload = {
+      ...record,
+      elevations: Object.fromEntries(elevationKeys.map((k) => [k, elevations[k]])),
+      to: 'support@webuild-structures.com',
+    };
+    const res = await fetch(emailEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Quote email endpoint responded ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
+    }
+    result.email = true;
+  } else {
+    result.emailSkipped = true;
+  }
+
+  // CRM / Zapier webhook — separate from email; never attach huge PNGs.
+  if (webhookEndpoint && webhookEndpoint !== emailEndpoint) {
+    const res = await fetch(webhookEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(record),
+    });
+    if (!res.ok) throw new Error(`Lead webhook responded ${res.status}`);
+    result.webhook = true;
+  } else if (webhookEndpoint && webhookEndpoint === emailEndpoint) {
+    // Same URL already handled as email endpoint.
+    result.webhook = result.email;
+  }
+
+  // If neither email nor webhook is configured, local + copy-JSON path is OK
+  // (phone preview before secrets are wired). Do not throw.
+  return result;
 }
 
 /** True only for a well-formed absolute https:// URL. */
@@ -898,6 +1041,37 @@ function resolveLeadWebhook() {
     return null;
   })();
   return leadWebhookLookup;
+}
+
+/**
+ * Resolve the quote → email endpoint (Cloudflare Worker / Resend proxy).
+ * First source wins:
+ *   1. `?quoteEmail=` query param
+ *   2. `window.__PBP_QUOTE_EMAIL_URL__`
+ *   3. `public/lead-config.json` → `quoteEmailUrl` on company or default
+ * Returns Promise<string|null>.
+ */
+function resolveQuoteEmail() {
+  if (quoteEmailLookup) return quoteEmailLookup;
+  quoteEmailLookup = (async () => {
+    const fromQuery = params.get('quoteEmail');
+    if (isHttpsUrl(fromQuery)) return fromQuery;
+
+    if (isHttpsUrl(window.__PBP_QUOTE_EMAIL_URL__)) return window.__PBP_QUOTE_EMAIL_URL__;
+
+    try {
+      const res = await fetch(new URL('lead-config.json', location.href), { cache: 'no-store' });
+      if (res.ok) {
+        const map = await res.json();
+        const entry = (map && (map[COMPANY_ID] || map.default)) || null;
+        if (entry && isHttpsUrl(entry.quoteEmailUrl)) return entry.quoteEmailUrl;
+      }
+    } catch (_) {
+      /* optional */
+    }
+    return null;
+  })();
+  return quoteEmailLookup;
 }
 
 

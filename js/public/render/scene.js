@@ -1552,40 +1552,14 @@ export class SceneView {
  * @returns {Promise<{ front?: string, back?: string, left?: string, right?: string }>}
  * data URLs keyed by wall; empty object when WebGL is unavailable.
  */
-
- /**
- * World AABB of building meshes only (exclude ground pick, trees, site props).
- * Framing on this.root alone includes a 400×400 ground plane → "outer space" shots.
- * @returns {THREE.Box3}
- */
- _buildingElevationBox() {
- const box = new THREE.Box3();
- let any = false;
- for (const child of this.root.children) {
- if (!child?.userData?.buildingId) continue;
- box.expandByObject(child);
- any = true;
- }
- if (!any) {
- // Fallback: everything except explicit ground pick
- for (const child of this.root.children) {
- if (child === this._groundPick || child?.userData?.kind === 'ground') continue;
- box.expandByObject(child);
- any = true;
- }
- }
- if (!any) box.setFromObject(this.root);
- return box;
- }
-
  async captureElevationShots(opts = {}) {
  const out = {};
  if (!this.webglOk || !this.renderer || !this.camera || !this.controls) {
  return out;
  }
 
- const maxW = Math.max(640, Math.min(opts.maxWidth || 1280, 1600));
- const maxH = Math.max(400, Math.min(opts.maxHeight || 800, 1000));
+ const maxW = Math.max(320, Math.min(opts.maxWidth || 1024, 1280));
+ const maxH = Math.max(240, Math.min(opts.maxHeight || 640, 800));
  const prevCamPos = this.camera.position.clone();
  const prevTarget = this.controls.target.clone();
  const prevAuto = !!this.controls.autoRotate;
@@ -1597,34 +1571,35 @@ export class SceneView {
  // Pause auto-orbit while we lock each elevation.
  this.controls.autoRotate = false;
 
- // Frame the building only — never the 400×400 ground pick / landscape.
- const box = this._buildingElevationBox();
+ const box = new THREE.Box3().setFromObject(this.root);
  let center = new THREE.Vector3(20, 8, 30);
  let size = new THREE.Vector3(40, 16, 50);
  if (!box.isEmpty()) {
  center = box.getCenter(new THREE.Vector3());
  size = box.getSize(new THREE.Vector3());
  }
- // Flat elevation eye height (mid building).
+ // Flat elevation eye height (mid building), not a high 3/4 view.
  const eyeY = center.y;
  this.controls.target.set(center.x, center.y, center.z);
 
- // Sharp export: use requested size, do NOT shrink to the tiny phone canvas.
- const exportW = maxW;
- const exportH = maxH;
+ // Cap export size relative to the on-screen canvas so Safari lite stays happy.
+ const exportW = Math.min(maxW, Math.max(320, Math.floor(prevSize.x) || maxW));
+ const exportH = Math.min(maxH, Math.max(240, Math.floor(prevSize.y) || maxH));
 
- // Comfortable fill: whole barn fills most of the frame (Levi zoom refs).
+ // FOV-fit so each wall nearly fills the frame (old maxDim*1.35 was way too far).
  const aspect = exportW / Math.max(exportH, 1);
  const vFov = THREE.MathUtils.degToRad(this.camera.fov || 38);
  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
- const pad = 1.15;
+ const pad = 1.18; // comfortable fill: whole barn visible, fills most of frame
  const distToFit = (spanW, spanH) => {
  const dH = (spanH * 0.5) / Math.tan(vFov / 2);
  const dW = (spanW * 0.5) / Math.tan(hFov / 2);
- return Math.max(dH, dW, 4) * pad;
+ return Math.max(dH, dW, 6) * pad;
  };
+ // Endwalls (front/back) frame width×height; sidewalls (left/right) frame length×height.
  const distEnd = distToFit(size.x, size.y);
  const distSide = distToFit(size.z, size.y);
+ // Match wall naming: front=-Z, back=+Z, left=-X, right=+X
  const sides = [
  { key: 'front', pos: [center.x, eyeY, center.z - distEnd] },
  { key: 'back', pos: [center.x, eyeY, center.z + distEnd] },
@@ -1633,8 +1608,7 @@ export class SceneView {
  ];
 
  try {
- // 2× pixel ratio for sharper PNGs on phone without huge payloads.
- this.renderer.setPixelRatio(2);
+ this.renderer.setPixelRatio(1);
  this.renderer.setSize(exportW, exportH, false);
  this.camera.aspect = aspect;
  this.camera.updateProjectionMatrix();

@@ -668,7 +668,7 @@ async function captureElevationShots() {
     return {};
   }
   try {
-    return (await scene.captureElevationShots({ maxWidth: 1024, maxHeight: 640 })) || {};
+    return (await scene.captureElevationShots({ maxWidth: 1280, maxHeight: 800 })) || {};
   } catch (err) {
     console.warn('[embed] elevation capture failed', err);
     return {};

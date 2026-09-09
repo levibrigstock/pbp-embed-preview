@@ -1,1 +1,3 @@
-PoleBarn Pro embed — develop sync (takeoff+benchmark+colors) v=20260908o
+PoleBarn Pro embed — roof metal color readability (v=20260908p)
+built: 2026-09-09T03:00:33Z
+source: polebarn-pro develop @ 4042333

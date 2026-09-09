@@ -968,6 +968,15 @@ export class SceneView {
  }
 
  /**
+   * Roof skin look — match walls so roof hue reads as clearly as sidewalls.
+   * Lite shares wall matte params; desktop uses wall-like metal (color-true).
+   */
+ _roofPanelOpts(extra = {}) {
+ // Prefer sharing wall opts so lite phones get the same matte + emissive path.
+ return this._wallPanelOpts(extra);
+ }
+
+ /**
    * Ag-panel metal material. ftAcross/ftAlong set UV so ribs are ~3' panel modules.
    * Geometry UVs are 0..1 over the panel face. Optional worldU0/worldV0 (ft) shift
    * the texture phase so seams continue across stacked panels / eave → gable.
@@ -1024,10 +1033,16 @@ export class SceneView {
  opacity: opts.opacity ?? 1,
  side: opts.side ?? THREE.FrontSide,
  });
- // Emissive lift so Brilliant/Alamo white read white on phone (not gray)
- if (liteMetal && lum > 0.65) {
+ // Emissive lift so whites and mid/dark roof hues read on phone (not washed gray)
+ if (liteMetal) {
+ if (lum > 0.65) {
  mat.emissive = col.clone();
  mat.emissiveIntensity = lum > 0.85 ? 0.14 : lum > 0.75 ? 0.09 : 0.05;
+ } else if (lum > 0.12) {
+ // BK/HG/etc. — slight lift so dark roof metal doesn't go flat gray
+ mat.emissive = col.clone();
+ mat.emissiveIntensity = lum > 0.4 ? 0.04 : 0.03;
+ }
  }
  return mat;
  } catch (err) {
@@ -1771,23 +1786,13 @@ export class SceneView {
  wallHex,
  Math.max(lt.length || b.length || 40, 12),
  Math.max(lt.eaveHeight || 10, 8),
- {
- metalness: 0.78,
- roughness: 0.32,
- normalStrength: 1.35,
- side: THREE.DoubleSide,
- },
+ this._wallPanelOpts({ side: THREE.DoubleSide }),
  );
  const leanRoof = this._agPanelMat(
  roofHex,
  Math.max(lt.depth || 12, 8),
  Math.max(lt.length || b.length || 40, 12),
- {
- metalness: 0.88,
- roughness: 0.26,
- normalStrength: 1.75,
- side: THREE.DoubleSide,
- },
+ this._roofPanelOpts({ side: THREE.DoubleSide }),
  );
  this._addLeanTo(group, b, lt, leanWall, leanRoof);
  }
@@ -2450,12 +2455,12 @@ export class SceneView {
    */
  _addGableRoof(group, b, W, L, H, rise, oh, wallHex, roofHex) {
  // U = across slope (eave→ridge), V = along eave — texture ribs run // ridge
- const roofMat = this._agPanelMat(roofHex, W / 2 + oh, L + oh * 2, {
- metalness: 0.88,
- roughness: 0.26,
- normalStrength: 1.75,
- side: THREE.DoubleSide,
- });
+ const roofMat = this._agPanelMat(
+ roofHex,
+ W / 2 + oh,
+ L + oh * 2,
+ this._roofPanelOpts({ side: THREE.DoubleSide }),
+ );
 
  // Left slope: eave-front → ridge-front → ridge-back → eave-back
  this._addRoofQuad(
@@ -2690,12 +2695,12 @@ export class SceneView {
 
  _addMonoRoof(group, b, W, L, H, rise, oh, roofHex) {
  // U = across slope, V = along eave — ribs // eave (same language as gable)
- const roofMat = this._agPanelMat(roofHex, W + oh * 2, L + oh * 2, {
- metalness: 0.88,
- roughness: 0.26,
- normalStrength: 1.75,
- side: THREE.DoubleSide,
- });
+ const roofMat = this._agPanelMat(
+ roofHex,
+ W + oh * 2,
+ L + oh * 2,
+ this._roofPanelOpts({ side: THREE.DoubleSide }),
+ );
  this._addRoofQuad(
  group,
  [
@@ -2765,8 +2770,9 @@ export class SceneView {
    */
  _addRoofSurfaceRibs(group, b, W, L, H, rise, oh, roofHex, style) {
  const ribMat = this._metalMat(new THREE.Color(roofHex).offsetHSL(0, 0, 0.08).getHex(), {
- metalness: 0.9,
- roughness: 0.25,
+ // Lite: low metal so raised ribs don't re-wash roof color
+ metalness: this.lite ? 0.05 : 0.9,
+ roughness: this.lite ? 0.78 : 0.25,
  });
  const along = L + oh * 2;
  if (style === 'gable') {
@@ -3825,14 +3831,13 @@ export class SceneView {
 
  const slopeFt = Math.max(Number(ftAcross) || 4, 4);
  const eaveFt = Math.max(Number(ftAlong) || 4, 4);
- const roofM = this._agPanelMat(roofHex, slopeFt, eaveFt, {
- metalness: 0.88,
- roughness: 0.26,
- normalStrength: 1.85,
- clearcoat: 0.35,
- clearcoatRoughness: 0.28,
- side: THREE.DoubleSide,
- });
+ const roofM = this._agPanelMat(
+ roofHex,
+ slopeFt,
+ eaveFt,
+ this._roofPanelOpts({ side: THREE.DoubleSide }),
+ );
+ // Keep lean roof DoubleSide + polygonOffset to avoid z-fight with main eave
  roofM.polygonOffset = true;
  roofM.polygonOffsetFactor = -1;
  roofM.polygonOffsetUnits = -1;
@@ -3899,7 +3904,11 @@ export class SceneView {
  ) {
  const ribMat = this._metalMat(
  new THREE.Color(roofHex).offsetHSL(0, 0, 0.07).getHex(),
- { metalness: 0.9, roughness: 0.24, side: THREE.DoubleSide },
+ {
+ metalness: this.lite ? 0.05 : 0.9,
+ roughness: this.lite ? 0.78 : 0.24,
+ side: THREE.DoubleSide,
+ },
  );
  const depthRun = Math.hypot(outerA.x - attachA.x, outerA.z - attachA.z) || 1;
  const steps = Math.max(4, Math.floor(depthRun / 0.75));
@@ -4251,8 +4260,9 @@ export class SceneView {
  _addLeanRoofSlopeRibs(group, i1, i2, o1, o2, hIn, hOut, roofHex) {
  if (!this.showMetal) return;
  const ribMat = this._metalMat(new THREE.Color(roofHex).offsetHSL(0, 0, 0.08).getHex(), {
- metalness: 0.9,
- roughness: 0.25,
+ // Lite: low metal so raised ribs don't re-wash roof color
+ metalness: this.lite ? 0.05 : 0.9,
+ roughness: this.lite ? 0.78 : 0.25,
  });
  // Length along the eave (building)
  const alongLen = Math.hypot(i2.x - i1.x, i2.z - i1.z) || 1;

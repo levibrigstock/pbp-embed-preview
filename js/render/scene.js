@@ -3528,10 +3528,10 @@ export class SceneView {
  );
  }
 
- // Wall-cap strip only if no roof overhang (OH fascia is drawn at the eave edge)
- if (ohFt < 0.04) {
+ // Top-of-wall eave band on the OUTER wall face (same language as main).
+ // Drip fascia still lives at the overhang tip when OH > 0; this band is the
+ // trim that sits atop sidewall metal so gable metal above it can read.
  this._addLeanFasciaStrip(group, oa, ob, outerWallTop - 0.05, isSide, trimHex);
- }
  }
 
  // ── END walls — same ag panel as main (rake trap + continuous UV + ribs) ──
@@ -3882,13 +3882,19 @@ export class SceneView {
  length,
  });
 
- // Front (outer) gable-end metal
- // Wall color (not roof) so triangle reads continuous with rectangle below
+ // Front (outer) gable-end metal on the WALL plane (outer posts), not the
+ // overhang drip line — otherwise the triangle sits past the OH and the
+ // wall face above eave trim reads as empty (missing metal).
+ // Wall color (not roof) so triangle reads continuous with rectangle below.
+ const wallPeak = {
+ x: (o1.x + o2.x) / 2,
+ z: (o1.z + o2.z) / 2,
+ };
  this._addLeanOuterGableEndMetal(
  group,
- rO1,
- rO2,
- outerMid,
+ o1,
+ o2,
+ wallPeak,
  eaveY,
  outerPeakY,
  wallHex,
@@ -4445,7 +4451,8 @@ export class SceneView {
  const rz = (Number(oRight.z) || 0) * FT;
  const px = (Number(oPeak.x) || 0) * FT;
  const pz = (Number(oPeak.z) || 0) * FT;
- const yBot = Math.max(0.5, Number(eaveY) || 10);
+ // Overlap slightly into lower wall so eave trim joint has no hairline gap
+ const yBot = Math.max(0.5, (Number(eaveY) || 10) - 0.06);
  const yPeak = Math.max(yBot + 0.25, Number(ridgeY) || yBot + 1);
  if (yPeak - yBot < 0.2) return;
 

@@ -1,1 +1,1 @@
-PoleBarn Pro embed — develop sync (takeoff+benchmark+colors) v=20260908o
+PoleBarn Pro embed — develop sync (3D clouds/ground/horizon + perf) v=20260909b

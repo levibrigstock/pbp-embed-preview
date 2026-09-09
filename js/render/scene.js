@@ -3208,6 +3208,35 @@ export class SceneView {
  hAtMain = Math.min(mainH, hAtOuter + Math.max(geoRise, 0.5 * FT));
  }
 
+ // Gable lean: peak sits ON main roof → outer eaveY can lift above H.
+ // Precompute once so outer wall metal / rake / gable triangle share the same top.
+ let gablePeakY = null;
+ let gableOuterPeakY = null;
+ let gableEaveY = null;
+ if (isGable) {
+ const halfWPre = length / 2 || 1;
+ const pitchPre = Number(lt.pitch) || 3;
+ const gableRisePre = halfWPre * (pitchPre / 12) * FT;
+ const mainOhFtPre =
+ ((Number(b.metalOverhangIn) ?? 3) + (Number(b.overhangIn) || 0)) / 12;
+ const mainRisePre = roofRise(b) * FT;
+ const WftPre = (Number(b.width) || 40) * FT;
+ const LftPre = (Number(b.length) || 40) * FT;
+ const roofTopPre = mainH + 0.02;
+ const onRoofLiftPre = 0.22;
+ const ontoRoofPre = Math.max(mainOhFtPre + 3.25, 3.5);
+ const halfSpanPre =
+ (lt.wall === 'left' || lt.wall === 'right' ? WftPre / 2 : LftPre / 2) +
+ mainOhFtPre;
+ const mainSlopePre = mainRisePre / Math.max(halfSpanPre, 1);
+ gablePeakY = roofTopPre + ontoRoofPre * mainSlopePre + onRoofLiftPre;
+ gableOuterPeakY = gablePeakY - 0.06;
+ gableEaveY = Math.max(H + 0.02, gableOuterPeakY - gableRisePre);
+ }
+ // Outer wall / end-rake top: lifted gable eave when gable, else shed hAtOuter
+ const outerWallTop =
+ isGable && gableEaveY != null ? gableEaveY : hAtOuter;
+
  // Concrete under lean footprint (optional, independent of main hasSlab)
  if (lt.hasSlab === true) {
  this._addLeanSlab(group, pkg, lt, b);
@@ -3257,7 +3286,7 @@ export class SceneView {
  const pick = new THREE.Mesh(
  new THREE.BoxGeometry(
  isSide ? 0.12 : length * FT,
- hAtOuter,
+ outerWallTop,
  isSide ? length * FT : 0.12,
  ),
  new THREE.MeshBasicMaterial({
@@ -3270,7 +3299,7 @@ export class SceneView {
  );
  pick.position.set(
  ((outerStart.x + outerEnd.x) / 2) * FT,
- hAtOuter / 2,
+ outerWallTop / 2,
  ((outerStart.z + outerEnd.z) / 2) * FT,
  );
  pick.userData = {
@@ -3289,7 +3318,7 @@ export class SceneView {
 
  // Wainscot (same visual language as main): full wall metal + proud band + trim strip
  // Enclosed lean only — open/carport leans stay main-structure wainscot only
- const wainHft = this._wainscotHeightFt(b, hAtOuter / FT);
+ const wainHft = this._wainscotHeightFt(b, outerWallTop / FT);
  const wainOn = wainHft > 0;
  const wainH = wainOn ? wainHft * FT : 0;
  const wainHex = this._colorFor(b.wainscotColor, 0x1a1a1a);
@@ -3304,7 +3333,7 @@ export class SceneView {
  if (!outerOpen) {
  const oux = (outerEnd.x - outerStart.x) / Math.max(length, 0.01);
  const ouz = (outerEnd.z - outerStart.z) / Math.max(length, 0.01);
- const wallHft = hAtOuter / FT;
+ const wallHft = outerWallTop / FT;
  const wainTopFt = wainH > 0.25 ? wainH / FT : 0;
 
  // Outer wall metal — same recipe as main:
@@ -3375,7 +3404,7 @@ export class SceneView {
  group,
  outerStart,
  outerEnd,
- hAtOuter,
+ outerWallTop,
  lt.wall,
  wallHex,
  outerOpens,
@@ -3399,7 +3428,7 @@ export class SceneView {
 
  // Wall-cap strip only if no roof overhang (OH fascia is drawn at the eave edge)
  if (ohFt < 0.04) {
- this._addLeanFasciaStrip(group, oa, ob, hAtOuter - 0.05, isSide, trimHex);
+ this._addLeanFasciaStrip(group, oa, ob, outerWallTop - 0.05, isSide, trimHex);
  }
  }
 
@@ -3411,7 +3440,7 @@ export class SceneView {
  const faceOpen = isLeanFaceOpen(lt, face);
  const aIn = nudge(aInRaw);
  const aOut = { x: aOutRaw.x, z: aOutRaw.z };
- const pickH = Math.max(hAtMain, hAtOuter);
+ const pickH = Math.max(hAtMain, outerWallTop);
  const sx = ((aInRaw.x + aOutRaw.x) / 2) * FT;
  const sz = ((aInRaw.z + aOutRaw.z) / 2) * FT;
  const alongDepthX = Math.abs(aOutRaw.x - aInRaw.x) >= Math.abs(aOutRaw.z - aInRaw.z);
@@ -3463,7 +3492,7 @@ export class SceneView {
  aIn,
  aOut,
  hAtMain,
- hAtOuter,
+ outerWallTop,
  null,
  {
  kind: 'wall',
@@ -3522,7 +3551,7 @@ export class SceneView {
  aIn,
  aOut,
  hAtMain,
- hAtOuter,
+ outerWallTop,
  wallHex,
  lt.wall,
  face,
@@ -3643,14 +3672,10 @@ export class SceneView {
  // Gable lean (benchmark top-down reference): lean peak sits ON the main roof eave
  // metal — flush with roof surface, not hanging under the overhang/sidewall.
  // Ridge runs outer peak → onto main roof. No under-eave T-joint.
+ // Y values (peakY / outerPeakY / eaveY) precomputed above as gable* — reuse to avoid drift.
  const halfW = length / 2 || 1;
- const pitch = Number(lt.pitch) || 3;
- const gableRise = halfW * (pitch / 12) * FT;
  const mainOhFt =
  ((Number(b.metalOverhangIn) ?? 3) + (Number(b.overhangIn) || 0)) / 12;
- const mainRise = roofRise(b) * FT;
- const Wft = (Number(b.width) || 40) * FT;
- const Lft = (Number(b.length) || 40) * FT;
  const outNx = (o1x - i1x) / (Math.hypot(o1x - i1x, o1z - i1z) || 1);
  const outNz = (o1z - i1z) / (Math.hypot(o1x - i1x, o1z - i1z) || 1);
  const al = Math.hypot(o2x - o1x, o2z - o1z) || 1;
@@ -3680,17 +3705,10 @@ export class SceneView {
  x: eaveTipMid.x - outNx * ontoRoof,
  z: eaveTipMid.z - outNz * ontoRoof,
  };
- // Main roof Y at that landing (pitch up from eave tip)
- const halfSpan =
- (lt.wall === 'left' || lt.wall === 'right' ? Wft / 2 : Lft / 2) +
- mainOhFt;
- const mainSlope = mainRise / Math.max(halfSpan, 1);
- const peakY = roofTop + ontoRoof * mainSlope + onRoofLift;
- // Outer peak of lean — level ridge out from peak-on-roof (benchmark flush look)
- // Drop slightly so water runs off lean, not into main
- const outerPeakY = peakY - 0.06;
- // Side eaves of lean (gable drop)
- const eaveY = Math.max(H + 0.02, outerPeakY - gableRise);
+ // Reuse early gable Y math (same as outer wall top) — zero gap with triangle base
+ const peakY = gablePeakY;
+ const outerPeakY = gableOuterPeakY;
+ const eaveY = gableEaveY;
 
  const outerMid = { x: (o1x + o2x) / 2, z: (o1z + o2z) / 2 };
  // High-edge corners of lean at main roof eave tip (// wall) — also ON roof metal
@@ -3763,6 +3781,7 @@ export class SceneView {
  });
 
  // Front (outer) gable-end metal
+ // Wall color (not roof) so triangle reads continuous with rectangle below
  this._addLeanOuterGableEndMetal(
  group,
  rO1,
@@ -3770,7 +3789,7 @@ export class SceneView {
  outerMid,
  eaveY,
  outerPeakY,
- roofHex,
+ wallHex,
  outNx,
  outNz,
  );

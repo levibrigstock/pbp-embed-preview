@@ -48,8 +48,14 @@ export const ROOF_ORDER_ADD_LONG_AT_FT = 28;
 /** Gable wall stock above roof-line (inches). benchmark: +1′2″ → 18′2″ steps on 30×12. */
 export const GABLE_STOCK_ABOVE_RAKE_IN = 14;
 
-/** Eave wall panel height above eave (inches). benchmark: eave + 8″ → 12′8″ on 12′ eave. */
+/** Legacy name — peak-snap tuck uses related extras; bury is pad-aware below. */
 export const EAVE_WALL_STOCK_ABOVE_EAVE_IN = 8;
+
+/**
+ * Wall sheet past finished floor / into grade when there is NO slab (inches).
+ * With slab: bury = 10 − slabThickness (6″ pad → 4″).
+ */
+export const WALL_PANEL_BELOW_FLOOR_IN = 10;
 
 // ── Girts ───────────────────────────────────────────────────────────
 
@@ -601,14 +607,49 @@ export function gablePanelLadderInches(b) {
   return Math.max(6, Math.round(PANEL_COVERAGE_FT * pitch));
 }
 
+/**
+ * Resolve slab on/thickness from main building or a lean host.
+ */
+function slabSpec(b, host = null) {
+  if (host) {
+    return {
+      hasSlab: host.hasSlab === true,
+      thicknessIn: Math.max(
+        0,
+        Number(host.slabThicknessIn) || Number(b?.slabThicknessIn) || 0,
+      ),
+    };
+  }
+  return {
+    hasSlab: b?.hasSlab === true,
+    thicknessIn: Math.max(0, Number(b?.slabThicknessIn) || 0),
+  };
+}
+
+/**
+ * Inches of wall sheet past finished floor.
+ * No slab → 10″. With slab → max(0, 10 − thickness). 6″ pad → 4″.
+ */
+export function wallPanelBelowFloorIn(b, host = null) {
+  const base = WALL_PANEL_BELOW_FLOOR_IN;
+  const { hasSlab, thicknessIn } = slabSpec(b, host);
+  if (hasSlab) return Math.max(0, base - thicknessIn);
+  return base;
+}
+
+/** Inches shorter vs no-slab order (usually = slab thickness when pad on). */
+export function wallPanelSlabShortenIn(b, host = null) {
+  return Math.max(0, WALL_PANEL_BELOW_FLOOR_IN - wallPanelBelowFloorIn(b, host));
+}
+
 export function eaveWallPanelHeightFt(b) {
   const eave = Number(b?.eaveHeight) || 12;
-  // When gable peak stock snaps to 20′ (32×12 4/12), benchmark orders eave walls at
-  // 13′10″ (= eave + 22″), consolidating stock with the tall gable package.
-  // Default remains eave + 8″ (12′8″) for 30/40/60 goldens.
+  // Pad-aware bury: 10″ no slab, 10″ − slab thk with pad (6″ → 4″).
+  // Peak-snap (32×12): +12″ tuck so no-slab ≈ eave+22″; with 6″ pad ≈ eave+16″.
+  const below = wallPanelBelowFloorIn(b);
   const ladder = gablePanelLadderInches(b);
-  const extra = ladder === 6 ? 14 : 0; // +14″ beyond normal 8″ → +22″ total
-  return eave + (EAVE_WALL_STOCK_ABOVE_EAVE_IN + extra) / 12;
+  const peakTuck = ladder === 6 ? 12 : 0;
+  return eave + (below + peakTuck) / 12;
 }
 
 // ── Trim packing (10' pieces unless noted) ──────────────────────────

@@ -21,7 +21,7 @@ import {
  isLeanFaceOpen,
  leanOpenFaceList,
  roundFtToNearestInch,
-} from './types.js?v=20260806f';
+} from './types.js?v=20260909t';
 import {
  useFullGirtPackage,
  girtPackMode,
@@ -34,7 +34,7 @@ import {
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260806f';
+} from './productionPolicy.js?v=20260909t';
 
 /**
  * Place posts on a wall line, including both ends.

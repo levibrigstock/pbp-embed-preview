@@ -164,6 +164,13 @@ export function createOpening(partial = {}) {
  const defaults = OPENING_TYPES[type] || OPENING_TYPES.walk;
  const defaultSill =
  type === 'window' ? 3 : 0;
+ /** Finish color WH (white) or BK (black) for doors and windows. */
+ const colorTypes =
+ type === 'walk' || type === 'overhead' || type === 'slider' || type === 'window';
+ let finishColor = String(partial.color || partial.doorColor || '').toUpperCase();
+ if (finishColor === 'WHITE' || finishColor === 'AL' || finishColor === 'WH') finishColor = 'WH';
+ else if (finishColor === 'BLACK' || finishColor === 'MB' || finishColor === 'BK') finishColor = 'BK';
+ else finishColor = colorTypes ? 'WH' : '';
  return {
  id: partial.id || uid('op'),
  type,
@@ -181,6 +188,8 @@ export function createOpening(partial = {}) {
  host: partial.host || 'main',
  /** Lean-to face when host is a lean-to id */
  face: partial.face || 'outer',
+ /** Walk / garage / slider / window finish: 'WH' | 'BK' */
+ color: colorTypes ? finishColor || 'WH' : '',
  };
 }
 

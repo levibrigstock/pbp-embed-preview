@@ -6,7 +6,7 @@
 import * as THREE from '../../vendor/three.module.js';
 // Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
 import { OrbitControls } from '../../vendor/OrbitControls.js';
-import { generateFraming } from '../domain/framing.js?v=20260806f';
+import { generateFraming } from '../domain/framing.js?v=20260909t';
 import {
  roofRise,
  wallLength,
@@ -16,7 +16,8 @@ import {
  isWallOpen,
  openWallList,
  isLeanFaceOpen,
-} from '../domain/types.js?v=20260806f';
+} from '../domain/types.js?v=20260909t';
+import { wallPanelBelowFloorIn } from '../domain/productionPolicy.js?v=20260909t';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
@@ -1925,16 +1926,53 @@ export class SceneView {
  return solids.filter((p) => p.u1 - p.u0 > 0.04 && p.v1 - p.v0 > 0.04);
  }
 
+ /**
+   * Rewrite BoxGeometry UVs so ag-panel ribs lock to absolute wall feet.
+   * Openings may split the mesh into pieces, but seams stay on the same 3′ grid
+   * as the gable metal above eave (tex_u = worldU/3, tex_v = worldV/8).
+   *
+   * Front (−Z) BoxGeometry U increases with −X → mirrorU so phase matches the
+   * gable triangle (uv = 1 − x/W). Back / left / right use natural +along.
+   */
+ _applyWorldWallUVs(
+ mesh,
+ { u0, u1, v0, v1, mirrorU = false, phaseUSpan, phaseVSpan, axis = 'x' },
+ ) {
+ const geo = mesh.geometry;
+ const pos = geo.attributes.position;
+ const uv = geo.attributes.uv;
+ if (!pos || !uv) return;
+ const len = Math.max(1e-6, u1 - u0);
+ const ht = Math.max(1e-6, v1 - v0);
+ const uSpan = Math.max(1e-6, Number(phaseUSpan) || len);
+ const vSpan = Math.max(1e-6, Number(phaseVSpan) || ht);
+ // BoxGeometry is centered at origin: along-axis ∈ [−len/2, +len/2], Y ∈ [−ht/2, +ht/2]
+ for (let i = 0; i < uv.count; i++) {
+ const lx = pos.getX(i);
+ const ly = pos.getY(i);
+ const lz = pos.getZ(i);
+ const alongLocal = axis === 'z' ? lz : lx;
+ const worldU = u0 + (alongLocal / len + 0.5) * len;
+ const worldV = v0 + (ly / ht + 0.5) * ht;
+ const uu = mirrorU ? 1 - worldU / uSpan : worldU / uSpan;
+ const vv = worldV / vSpan;
+ uv.setXY(i, uu, vv);
+ }
+ uv.needsUpdate = true;
+ }
+
  /** Place one wall metal panel in wall-local u/v (ft). */
- _addWallPanel(group, wdef, panel, mat, thick, wallLenFt, buildingId) {
+ _addWallPanel(group, wdef, panel, mat, thick, wallLenFt, buildingId, uvPhase = null) {
  const len = panel.u1 - panel.u0;
  let ht = panel.v1 - panel.v0;
  if (len < 0.04 || ht < 0.04) return;
  const uMid = (panel.u0 + panel.u1) / 2;
  // Bury bottom panels slightly so no exterior foundation gap shows
  const bury = panel.v0 < 0.15 ? 0.1 : 0;
- ht += bury;
- const vMid = (panel.v0 + panel.v1) / 2 - bury / 2;
+ const v0Draw = panel.v0 - bury;
+ const v1Draw = panel.v1;
+ ht = v1Draw - v0Draw;
+ const vMid = (v0Draw + v1Draw) / 2;
  let mesh;
  if (wdef.axis === 'x') {
  mesh = new THREE.Mesh(new THREE.BoxGeometry(len, ht, thick), mat);
@@ -1943,6 +1981,19 @@ export class SceneView {
  mesh = new THREE.Mesh(new THREE.BoxGeometry(thick, ht, len), mat);
  mesh.position.set(wdef.x, vMid, uMid);
  }
+ // Lock rib phase to the full wall — same space as gable-above-eave metal
+ const phaseU = uvPhase?.uSpan ?? wallLenFt ?? len;
+ const phaseV = uvPhase?.vSpan ?? Math.max(v1Draw, ht);
+ this._applyWorldWallUVs(mesh, {
+ u0: panel.u0,
+ u1: panel.u1,
+ v0: v0Draw,
+ v1: v1Draw,
+ mirrorU: !!uvPhase?.mirrorU || wdef.wall === 'front',
+ phaseUSpan: phaseU,
+ phaseVSpan: phaseV,
+ axis: wdef.axis || 'x',
+ });
  mesh.castShadow = true;
  mesh.receiveShadow = true;
  mesh.userData = {
@@ -1989,7 +2040,9 @@ export class SceneView {
  // Trim color is independent of roof — resolve explicitly so dropdown changes apply
  const trimCode = b.trimColor || b.roofColor || 'BK';
  const trimHex = this._colorFor(trimCode, this._colorFor('BK', 0x1a1a1a));
- const wallHft = H / FT;
+ // Pad-aware bury: 10″ no slab, 10″−thk with slab (6″ → 4″)
+ const belowFt = wallPanelBelowFloorIn(b) / 12;
+ const wallHft = H / FT + belowFt;
 
  for (const wdef of walls) {
  const wallIsOpen = isWallOpen(b, wdef.wall);
@@ -1999,9 +2052,14 @@ export class SceneView {
  const wallOpenings = (b.openings || []).filter(
  (o) => (!o.host || o.host === 'main') && o.wall === wdef.wall,
  );
- const panels = sheetLowerWall
+ const panelsRaw = sheetLowerWall
  ? this._wallSolidPanels(wdef.span, wallHft, wallOpenings)
  : [];
+ const panels = panelsRaw.map((p) => ({
+ ...p,
+ v0: p.v0 - belowFt,
+ v1: p.v1 - belowFt,
+ }));
  const thick = 0.16;
  const wallLenFt = wallLength(b, wdef.wall);
 
@@ -2038,27 +2096,34 @@ export class SceneView {
  // Drive-through: no lower wall metal / ribs / wainscot (eave height and below)
  if (!sheetLowerWall) continue;
 
- // Metal panels = wall minus rectangular opening cutouts
- // worldU0/worldV0 keep panel phase continuous across openings & into gable
+ // Peak height used as V-phase span on gable ends so lower wall + upper triangle share one UV space
+ const isGableEnd =
+ b.roofStyle === 'gable' && (wdef.wall === 'front' || wdef.wall === 'back');
+ const phaseVSpan = isGableEnd ? H / FT + rise / FT + 0.04 : wallHft;
+ const uvPhase = {
+ uSpan: wdef.span,
+ vSpan: phaseVSpan,
+ mirrorU: wdef.wall === 'front',
+ };
+
+ // Metal panels = wall minus rectangular opening cutouts.
+ // Material phase spans the FULL wall (same as gable-above-eave) so openings
+ // never shift rib seams relative to the metal above sidewall height.
  for (const panel of panels) {
- const len = panel.u1 - panel.u0;
- const ht = panel.v1 - panel.v0;
  const wallMat = this._agPanelMat(
  wallHex,
- len,
- ht,
+ uvPhase.uSpan,
+ uvPhase.vSpan,
  this._wallPanelOpts({
- worldU0: panel.u0,
- worldV0: panel.v0,
+ worldU0: 0,
+ worldV0: 0,
  }),
  );
- this._addWallPanel(group, wdef, panel, wallMat, thick, wallLenFt, b.id);
+ this._addWallPanel(group, wdef, panel, wallMat, thick, wallLenFt, b.id, uvPhase);
  }
 
  // Ribs: full wall, skip opening rectangles. Gable front/back ribs are drawn
  // later grade→peak in _addGableEndUpperMetal so the eave joint is one continuous rib.
- const isGableEnd =
- b.roofStyle === 'gable' && (wdef.wall === 'front' || wdef.wall === 'back');
  if (!isGableEnd) {
  const ribWdef = {
  wall: wdef.wall,
@@ -2083,11 +2148,11 @@ export class SceneView {
  const ht = v1 - v0;
  const wainMat = this._agPanelMat(
  wainHex,
- len,
- ht,
+ uvPhase.uSpan,
+ uvPhase.vSpan,
  this._wallPanelOpts({
- worldU0: panel.u0,
- worldV0: v0,
+ worldU0: 0,
+ worldV0: 0,
  }),
  );
  const uMid = (panel.u0 + panel.u1) / 2;
@@ -2108,6 +2173,16 @@ export class SceneView {
  uMid,
  );
  }
+ this._applyWorldWallUVs(wain, {
+ u0: panel.u0,
+ u1: panel.u1,
+ v0,
+ v1,
+ mirrorU: uvPhase.mirrorU,
+ phaseUSpan: uvPhase.uSpan,
+ phaseVSpan: uvPhase.vSpan,
+ axis: wdef.axis || 'x',
+ });
  wain.castShadow = true;
  group.add(wain);
  }
@@ -2912,8 +2987,12 @@ export class SceneView {
  g.add(sillP);
 
  if (type === 'window') {
+ const winCode = o.color === 'BK' ? 'BK' : 'WH';
+ const frameCol = selected
+ ? 0xc45a20
+ : this._colorFor(winCode, winCode === 'WH' ? 0xf5f5f2 : 0x2c2c30);
  const vinyl = new THREE.MeshStandardMaterial({
- color: 0xf5f5f2,
+ color: frameCol,
  roughness: 0.4,
  metalness: 0.08,
  });
@@ -2948,7 +3027,10 @@ export class SceneView {
  glint.position.set(-gw * 0.2, gh * 0.15, 0.23);
  g.add(glint);
  } else if (type === 'walk') {
- const doorCol = selected ? 0xc45a20 : this._colorFor(b.trimColor || 'BK', 0x2c2c30);
+ const doorCode = o.color === 'BK' ? 'BK' : 'WH';
+ const doorCol = selected
+ ? 0xc45a20
+ : this._colorFor(doorCode, doorCode === 'WH' ? 0xf5f5f2 : 0x2c2c30);
  const doorSkin = new THREE.MeshStandardMaterial({
  color: doorCol,
  metalness: 0.45,
@@ -2996,7 +3078,10 @@ export class SceneView {
  deadbolt.position.set(w * 0.28, 0.22, 0.3);
  g.add(deadbolt);
  } else if (type === 'overhead' || type === 'slider') {
- const doorCol = selected ? 0xc45a20 : this._colorFor(b.trimColor || 'SL', 0x3a3a40);
+ const doorCode = o.color === 'BK' ? 'BK' : 'WH';
+ const doorCol = selected
+ ? 0xc45a20
+ : this._colorFor(doorCode, doorCode === 'WH' ? 0xf5f5f2 : 0x2c2c30);
  const doorMat = new THREE.MeshStandardMaterial({
  color: doorCol,
  roughness: 0.42,
@@ -3033,12 +3118,13 @@ export class SceneView {
  }
 
  {
+ const doorTone = o.color === 'BK' ? ' BK' : ' WH';
  const sizeTxt =
  type === 'walk'
- ? `WALK ${formatOpeningLabel(o.width, o.height)}`
+ ? `WALK ${formatOpeningLabel(o.width, o.height)}${doorTone}`
  : type === 'window'
- ? `WIN ${formatOpeningLabel(o.width, o.height)}`
- : `OH ${formatOpeningLabel(o.width, o.height)}`;
+ ? `WIN ${formatOpeningLabel(o.width, o.height)}${doorTone}`
+ : `OH ${formatOpeningLabel(o.width, o.height)}${doorTone}`;
  const label = this._makeOpeningLabel(sizeTxt);
  label.position.set(0, h / 2 + 0.55, 0.4);
  if (!selected) label.scale.set(4.2, 1.05, 1);

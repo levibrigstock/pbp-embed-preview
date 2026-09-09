@@ -18,6 +18,7 @@ import {
  isLeanFaceOpen,
 } from '../domain/types.js?v=20260806f';
 import { buildSitePropMesh } from './props.js';
+import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
 const FT = 1;
 
@@ -316,24 +317,37 @@ export class SceneView {
  const ctx = c.getContext('2d');
  ctx.fillStyle = '#4a7a3a';
  ctx.fillRect(0, 0, S, S);
+ // The tile repeats, so every blob is drawn nine times — once in place and
+ // once for each neighbouring tile. Blobs clipped at the canvas edge used to
+ // leave a hard seam at every tile boundary, which read as a grid of lines
+ // across the field once the camera was close enough to resolve it.
  for (let k = 0; k < 80; k++) {
+ const cx = Math.random() * S;
+ const cy = Math.random() * S;
+ const rx = 4 + Math.random() * 18;
+ const ry = 3 + Math.random() * 12;
+ const rot = Math.random() * Math.PI;
  ctx.fillStyle = `rgba(${40 + Math.random() * 40},${80 + Math.random() * 50},${30 + Math.random() * 25},${0.15 + Math.random() * 0.2})`;
+ for (let dy = -1; dy <= 1; dy++) {
+ for (let dx = -1; dx <= 1; dx++) {
  ctx.beginPath();
- ctx.ellipse(
- Math.random() * S,
- Math.random() * S,
- 4 + Math.random() * 18,
- 3 + Math.random() * 12,
- Math.random() * Math.PI,
- 0,
- Math.PI * 2,
- );
+ ctx.ellipse(cx + dx * S, cy + dy * S, rx, ry, rot, 0, Math.PI * 2);
  ctx.fill();
+ }
+ }
  }
  const tex = new THREE.CanvasTexture(c);
  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
  tex.repeat.set(36, 36);
+ tex.generateMipmaps = true;
+ tex.minFilter = THREE.LinearMipmapLinearFilter;
+ // Grazing views across a tiled ground are exactly where low anisotropy
+ // turns tile boundaries into visible streaks.
+ try {
+ tex.anisotropy = Math.min(8, this.renderer?.capabilities?.getMaxAnisotropy?.() || 4);
+ } catch (_) {
  tex.anisotropy = 4;
+ }
  setTextureColorSpace(tex, true);
  this._grassTex = tex;
  return tex;
@@ -409,54 +423,25 @@ export class SceneView {
  this._skyMat = skyMat;
  this.envGroup.add(new THREE.Mesh(skyGeo, skyMat));
 
- // Soft cloud puffs (billboard-ish spheres, low opacity)
- const cloudMat = new THREE.MeshStandardMaterial({
- color: 0xffffff,
- roughness: 1,
- metalness: 0,
- transparent: true,
- opacity: 0.22,
- depthWrite: false,
- });
- for (let i = 0; i < 10; i++) {
- const cloud = new THREE.Group();
- const ang = (i / 10) * Math.PI * 2 + 0.3;
- const dist = 90 + (i % 3) * 25;
- cloud.position.set(Math.cos(ang) * dist, 28 + (i % 4) * 4, Math.sin(ang) * dist);
- for (let j = 0; j < 4; j++) {
- const puff = new THREE.Mesh(
- new THREE.SphereGeometry(6 + (j % 3) * 2.5, 12, 10),
- cloudMat,
- );
- puff.position.set(j * 5 - 6, (j % 2) * 1.5, (j - 1.5) * 2);
- puff.scale.set(1.4, 0.55, 1);
- cloud.add(puff);
- }
- this.envGroup.add(cloud);
- }
-
  // Site pad + outer field — same green (no white center disc)
  const siteGreen = 0x3a6a30;
  const grassMap = this._grassTexture();
 
- // Inner circle under building / trees — solid match to outer ring green
- const sitePad = new THREE.Mesh(
- new THREE.CircleGeometry(48, 64),
- new THREE.MeshStandardMaterial({
- color: siteGreen,
- roughness: 0.96,
- metalness: 0,
- side: THREE.FrontSide,
- }),
- );
- sitePad.rotation.x = -Math.PI / 2;
- sitePad.position.y = -0.035;
- sitePad.receiveShadow = true;
- this.envGroup.add(sitePad);
+ // Two ground surfaces, and the lower one is a full disc.
+ //
+ // This was three rings whose edges all terminated at r=48 with different
+ // segment counts (64, 80, 96). Polygons that fine never line up, so the
+ // boundary leaked background through the cracks as a dashed white ring —
+ // the "lines in the ground" that appeared as the camera moved in. Stacking
+ // an unbroken disc underneath means there is no edge to leak through, and
+ // the flat cap overlaps it by a wide margin rather than butting against it.
+ //
+ // The pad and the mown band were the same colour and finish, so they are one
+ // surface now. Look is unchanged: flat green out to r=95, grass beyond.
 
- // Outer field ring — same green
+ // Outer field — full disc, nothing above it past r=95
  const ground = new THREE.Mesh(
- new THREE.RingGeometry(48, 200, 96),
+ new THREE.CircleGeometry(200, 128),
  new THREE.MeshStandardMaterial({
  color: siteGreen,
  map: grassMap,
@@ -471,39 +456,64 @@ export class SceneView {
  ground.material.map.needsUpdate = true;
  }
  ground.rotation.x = -Math.PI / 2;
- ground.position.y = -0.04;
+ ground.position.y = -0.08;
  ground.receiveShadow = true;
  this.envGroup.add(ground);
 
- // Mown band just outside site pad — same green
- const ring = new THREE.Mesh(
- new THREE.RingGeometry(48, 95, 80),
+ // Mown site pad over it — one flat cap, no internal seam
+ const sitePad = new THREE.Mesh(
+ new THREE.CircleGeometry(95, 96),
  new THREE.MeshStandardMaterial({
  color: siteGreen,
- roughness: 0.98,
+ roughness: 0.96,
+ metalness: 0,
  side: THREE.FrontSide,
  }),
  );
- ring.rotation.x = -Math.PI / 2;
- ring.position.y = -0.03;
- ring.receiveShadow = true;
- this.envGroup.add(ring);
+ sitePad.rotation.x = -Math.PI / 2;
+ sitePad.position.y = -0.03;
+ sitePad.receiveShadow = true;
+ this.envGroup.add(sitePad);
 
- // Distant horizon hills
- for (let i = 0; i < 6; i++) {
+ // Distant horizon hills.
+ //
+ // These used to be six translucent domes centred 175 ft out with a 77 ft
+ // radius scaled 1.5x — so they reached inward to r=59 and stood 30 ft tall,
+ // overlapping the site and each other. At 0.4 opacity they read as soft green
+ // smudges lying over the grass rather than as landforms.
+ //
+ // They are opaque now, and buried deep enough and far enough out that only
+ // their tops clear the ground disc's edge at r=200. Two bands give the
+ // horizon depth: the far one is paler and bluer, the way distance actually
+ // washes colour out.
+ // Buried to `base`, so only the cap above y=0 shows. Keep the caps low:
+ // tall bands stop reading as distance and start reading as walls.
+ const hillBands = [
+ { count: 7, dist: 300, radius: 70, spread: 1.9, height: 0.62, base: -25, hsl: [0.3, 0.26, 0.38], phase: 0.4 },
+ { count: 8, dist: 340, radius: 80, spread: 2.0, height: 0.75, base: -25, hsl: [0.29, 0.2, 0.44], phase: 1.1 },
+ ];
+ for (const band of hillBands) {
+ for (let i = 0; i < band.count; i++) {
+ // Vary each hill a little so the ridge does not read as a stamped pattern.
+ const jitter = Math.sin(i * 12.9898 + band.phase * 7.233);
+ const [h, sat, light] = band.hsl;
  const hill = new THREE.Mesh(
- new THREE.SphereGeometry(42 + i * 7, 20, 14, 0, Math.PI * 2, 0, Math.PI / 2),
+ new THREE.SphereGeometry(band.radius, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2),
  new THREE.MeshStandardMaterial({
- color: new THREE.Color().setHSL(0.32, 0.28, 0.28 + i * 0.02),
+ color: new THREE.Color().setHSL(h, sat, light + jitter * 0.035),
  roughness: 1,
- transparent: true,
- opacity: 0.4,
+ metalness: 0,
  }),
  );
- const ang = (i / 6) * Math.PI * 2 + 0.4;
- hill.position.set(Math.cos(ang) * 175, -10, Math.sin(ang) * 175);
- hill.scale.set(1.5, 0.32 + i * 0.04, 1.25);
+ const ang = (i / band.count) * Math.PI * 2 + band.phase;
+ const dist = band.dist + jitter * 18;
+ hill.position.set(Math.cos(ang) * dist, band.base, Math.sin(ang) * dist);
+ hill.scale.set(band.spread, band.height * (1 + jitter * 0.12), band.spread * 0.85);
+ hill.rotation.y = jitter * 1.4;
+ hill.castShadow = false;
+ hill.receiveShadow = false;
  this.envGroup.add(hill);
+ }
  }
 
  // Trees placed later in rebuild() relative to building footprints
@@ -834,39 +844,42 @@ export class SceneView {
 
  // Ag panel profile across U (one panel module = full canvas width = 3 ft coverage)
  // Major high ribs + minor intermediate ribs (typical exposed-fastener ag panel)
- for (let y = 0; y < H; y++) {
- for (let x = 0; x < W; x++) {
+ // Everything that varies only with U is built once per column instead of once
+ // per pixel: the rib profile alone was ~14 Math.exp/Math.pow calls on each of
+ // 262k pixels, which made the first use of a new colour the slowest operation
+ // in the app. Output is byte-for-byte identical.
+ const majors = [0.0, 0.5, 1.0];
+ const minors = [0.17, 0.33, 0.67, 0.83];
+ const screwCols = [0.08, 0.5, 0.92];
+ // One extra entry so the normal map can read the next column's rib height.
+ const ribU = new Float64Array(W + 1);
+ const oilU = new Float64Array(W);
+ const seamU = new Float64Array(W);
+ const screwColU = new Uint8Array(W);
+ for (let x = 0; x <= W; x++) {
  const u = x / W; // 0..1 across one panel
- const v = y / H;
-
- // Major ribs near edges + center (like R-panel / high-rib ag)
  // Profile height 0..1
  let profile = 0;
- // Trapezoid major ribs at ~0, 0.5, 1.0 of panel
- const majors = [0.0, 0.5, 1.0];
  for (const m of majors) {
  const d = Math.min(Math.abs(u - m), Math.abs(u - m + 1), Math.abs(u - m - 1));
  // major rib ~1.25" wide on 36" panel ≈ 0.035 of width, tall
  profile = Math.max(profile, Math.exp(-Math.pow(d / 0.028, 2)) * 1.0);
  }
  // Minor ribs between majors
- const minors = [0.17, 0.33, 0.67, 0.83];
  for (const m of minors) {
  const d = Math.abs(u - m);
  profile = Math.max(profile, Math.exp(-Math.pow(d / 0.018, 2)) * 0.35);
  }
- // Subtle oil-canning / flat waviness
- profile += 0.04 * Math.sin(u * Math.PI * 14) * Math.sin(v * Math.PI * 3);
-
+ ribU[x] = profile;
+ if (x === W) break;
+ // Subtle oil-canning / flat waviness — the V half is folded in per row
+ oilU[x] = 0.04 * Math.sin(u * Math.PI * 14);
  // Panel end lap / side lap seam darkening
- const seam = u < 0.012 || u > 0.988 ? 0.18 : 0;
-
- // Screw lines along length every ~2 ft (v direction): tiny dark dots rows
- const screwRow = Math.abs(((v * 8) % 1) - 0.5);
- const screwCol = Math.min(
- ...[0.08, 0.5, 0.92].map((m) => Math.abs(u - m)),
- );
- const screw = screwRow < 0.03 && screwCol < 0.025 ? 0.25 : 0;
+ seamU[x] = u < 0.012 || u > 0.988 ? 0.18 : 0;
+ let nearestScrew = Infinity;
+ for (const m of screwCols) nearestScrew = Math.min(nearestScrew, Math.abs(u - m));
+ screwColU[x] = nearestScrew < 0.025 ? 1 : 0;
+ }
 
  // Grayscale shade only — panel hue is material.color (keeps Bright White white).
  // Light panels: almost no flatten; seams/screws stay subtle.
@@ -876,7 +889,19 @@ export class SceneView {
  const shadeAmp = Math.max(0.04, 1 - shadeFloor) * 0.7;
  const seamW = lum > 0.7 ? 0.04 : 0.18;
  const screwW = lum > 0.7 ? 0.08 : 0.35;
- const shade = Math.max(lum > 0.7 ? 0.88 : 0.55, shadeFloor + profile * shadeAmp - seam * seamW - screw * screwW);
+ const shadeMin = lum > 0.7 ? 0.88 : 0.55;
+
+ for (let y = 0; y < H; y++) {
+ const v = y / H;
+ const oilV = Math.sin(v * Math.PI * 3);
+ // Screw lines along length every ~2 ft (v direction): tiny dark dots rows
+ const screwRowHit = Math.abs(((v * 8) % 1) - 0.5) < 0.03;
+ for (let x = 0; x < W; x++) {
+ const profile = ribU[x] + oilU[x] * oilV;
+ const seam = seamU[x];
+ const screw = screwRowHit && screwColU[x] ? 0.25 : 0;
+
+ const shade = Math.max(shadeMin, shadeFloor + profile * shadeAmp - seam * seamW - screw * screwW);
  const i = (y * W + x) * 4;
  const g = Math.min(255, Math.max(0, Math.round(255 * shade)));
  img.data[i] = g;
@@ -884,19 +909,9 @@ export class SceneView {
  img.data[i + 2] = g;
  img.data[i + 3] = 255;
 
- // Normal map: derivative of profile in U (ribs run along V)
- // Sample neighbor for slope
- const u2 = (x + 1) / W;
- let p2 = 0;
- for (const m of majors) {
- const d = Math.min(Math.abs(u2 - m), Math.abs(u2 - m + 1), Math.abs(u2 - m - 1));
- p2 = Math.max(p2, Math.exp(-Math.pow(d / 0.028, 2)));
- }
- for (const m of minors) {
- const d = Math.abs(u2 - m);
- p2 = Math.max(p2, Math.exp(-Math.pow(d / 0.018, 2)) * 0.35);
- }
- const du = (p2 - profile) * 3.2; // strength
+ // Normal map: derivative of profile in U (ribs run along V).
+ // The neighbour sample is the raw rib height, as before — no oil-canning.
+ const du = (ribU[x + 1] - profile) * 3.2; // strength
  // normal in tangent space
  let nx = -du;
  let ny = 0.0;
@@ -1249,6 +1264,7 @@ export class SceneView {
  _loop() {
  if (!this._running || !this.renderer) return;
  requestAnimationFrame(() => this._loop());
+ perf.frame();
  this.controls?.update?.();
  // gentle sun drift for life
  const t = this._clock.getElapsedTime();
@@ -1276,7 +1292,7 @@ export class SceneView {
 
  setProject(project) {
  this.project = project;
- this.rebuild();
+ perf.time('geometry.rebuild', () => this.rebuild());
  }
 
  rebuild() {

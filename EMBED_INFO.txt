@@ -1,3 +1,1 @@
-PoleBarn Pro embed — gable lean outer wall gap fix (v=20260909a)
-built: 2026-09-09T16:52:40Z
-source: polebarn-pro develop @ 289708b
+PoleBarn Pro embed — develop sync v=20260909b

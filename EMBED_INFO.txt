@@ -1,1 +1,8 @@
-PoleBarn Pro embed — develop sync (roof framing clearance + truss types) v=20260910u
+PoleBarn Pro — public configurator embed package
+built: 2026-09-10T21:18:38Z
+entry: /public/embed.html?companyId=demo
+pack:  scripts/pack-embed.sh
+docs:  EMBED_HOSTING.md (repo root)
+note:  copy public/lead-config.example.json → public/lead-config.json for webhooks
+note:  copy public/company-config.example.json → public/company-config.json for branding
+exclude: main app, takeoff, CRM, catalog, reference PDFs

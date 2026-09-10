@@ -19,12 +19,12 @@ export const TRUSS_TYPES = [
   {
     id: 'scissor',
     label: 'Scissor',
-    blurb: 'Sloped bottom chords for a vaulted / cathedral ceiling (~½ roof pitch).',
+    blurb: 'Open loft bay under the roof — vertical knee walls + collar (shop “scissor” look).',
   },
   {
     id: 'attic',
     label: 'Attic (room-in-attic)',
-    blurb: 'Loft room in the truss — storage or living space above.',
+    blurb: 'Sloped bottom chords for a vaulted / cathedral ceiling (~½ roof pitch).',
   },
   {
     id: 'parallelChord',
@@ -91,7 +91,55 @@ export function trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof = 0.28 }
     ],
   ];
 
+  // NOTE: UI labels Scissor / Attic map to the geometries below (swapped once
+  // after user feedback so the names match what they expect to see).
   if (type === 'scissor') {
+    // Vaulted / “scissor” look the user expects: rectangular loft under the roof
+    // (room-in-attic style framing). Single-pitch top chords — not gambrel.
+    const riseAvail = Math.max(1.25, topRidge - topEave);
+    const wantH = Math.min(7.5, Math.max(3.25, riseAvail - 0.85));
+    const tKnee = Math.min(0.92, Math.max(0.2, wantH / riseAvail));
+    const x0 = left + tKnee * (mid - left);
+    const x1 = right - tKnee * (right - mid);
+    const yFloor = topEave;
+    const yCeil = yTop(x0);
+
+    const jHeelL = [left + 0.05, yFloor];
+    const jHeelR = [right - 0.05, yFloor];
+    const jKneeL = [x0, yFloor];
+    const jKneeR = [x1, yFloor];
+    const jCollarL = [x0, yCeil];
+    const jCollarR = [x1, yCeil];
+    const jPeak = [mid, topRidge];
+
+    const xMidL = lerp(x0, mid, 0.5);
+    const xMidR = lerp(mid, x1, 0.5);
+    const jTopMidL = [xMidL, yTop(xMidL)];
+    const jTopMidR = [xMidR, yTop(xMidR)];
+
+    return {
+      type,
+      top,
+      bottom: [[jHeelL, jHeelR]],
+      webs: [
+        [jKneeL, jCollarL],
+        [jKneeR, jCollarR],
+        [jCollarL, jCollarR],
+        [jHeelL, jCollarL],
+        [jHeelR, jCollarR],
+        [jCollarL, jPeak],
+        [jCollarR, jPeak],
+        [jCollarL, jTopMidL],
+        [jCollarR, jTopMidR],
+        [jTopMidL, jPeak],
+        [jTopMidR, jPeak],
+      ],
+      atticRoom: { x0, x1, yFloor, yCeil },
+    };
+  }
+
+  if (type === 'attic') {
+    // Sloped bottom chords (~½ roof pitch) — vaulted ceiling look.
     const botPitch = pitch * 0.5;
     const botRise = (mid - left) * botPitch;
     const botPeak = topEave + botRise;
@@ -102,7 +150,6 @@ export function trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof = 0.28 }
     const jR = [right - 0.05, topEave];
     const jPeakTop = [mid, topRidge];
 
-    // Panel points on top & bottom chords (exact Y on each chord)
     const xA = lerp(left, mid, 0.45);
     const xB = lerp(mid, right, 0.55);
     const jATop = [xA, yTop(xA)];
@@ -126,61 +173,6 @@ export function trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof = 0.28 }
         [jATop, jPeakBot],
         [jBTop, jPeakBot],
       ],
-    };
-  }
-
-  if (type === 'attic') {
-    // Room-in-attic: single-pitch top chords + flat floor + rectangular room.
-    // Room width is limited by roof rise so knee walls fit under the slope.
-    const riseAvail = Math.max(1.25, topRidge - topEave);
-    // Target clear height, but never taller than rise − heel clearance
-    const wantH = Math.min(7.5, Math.max(3.25, riseAvail - 0.85));
-    // At knee wall, top chord height above floor ≈ wantH
-    // yTop(x0) - topEave = wantH  =>  fraction from mid
-    // From left: (x0-left)/(mid-left) * riseAvail = wantH
-    const tKnee = Math.min(0.92, Math.max(0.2, wantH / riseAvail));
-    const x0 = left + tKnee * (mid - left);
-    const x1 = right - tKnee * (right - mid);
-    const yFloor = topEave;
-    // Collar meets the top chords at the knee (classic attic look)
-    const yCeil = yTop(x0);
-
-    const jHeelL = [left + 0.05, yFloor];
-    const jHeelR = [right - 0.05, yFloor];
-    const jKneeL = [x0, yFloor];
-    const jKneeR = [x1, yFloor];
-    const jCollarL = [x0, yCeil];
-    const jCollarR = [x1, yCeil];
-    const jPeak = [mid, topRidge];
-
-    // Extra top-chord panel points above the room for webbing
-    const xMidL = lerp(x0, mid, 0.5);
-    const xMidR = lerp(mid, x1, 0.5);
-    const jTopMidL = [xMidL, yTop(xMidL)];
-    const jTopMidR = [xMidR, yTop(xMidR)];
-
-    return {
-      type,
-      top,
-      bottom: [[jHeelL, jHeelR]],
-      webs: [
-        // Room side walls (verticals) — floor to collar / top chord
-        [jKneeL, jCollarL],
-        [jKneeR, jCollarR],
-        // Attic ceiling / collar tie
-        [jCollarL, jCollarR],
-        // Outer knee braces: heel → collar (triangulate outer bays)
-        [jHeelL, jCollarL],
-        [jHeelR, jCollarR],
-        // Above room: collar corners → peak (and mid points)
-        [jCollarL, jPeak],
-        [jCollarR, jPeak],
-        [jCollarL, jTopMidL],
-        [jCollarR, jTopMidR],
-        [jTopMidL, jPeak],
-        [jTopMidR, jPeak],
-      ],
-      atticRoom: { x0, x1, yFloor, yCeil },
     };
   }
 

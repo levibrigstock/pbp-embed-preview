@@ -26,7 +26,7 @@ import {
  includeFullFramingExtras,
  gableFlyRafterQty,
 } from '../domain/productionPolicy.js?v=20260910q';
-import { trussMemberLayout } from '../domain/trussTypes.js?v=20260910u';
+import { trussMemberLayout } from '../domain/trussTypes.js?v=20260910v';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 

@@ -485,10 +485,26 @@ export function trussBlockQty(buildingLengthFt, b = null) {
   return n;
 }
 
-/** Gable fly / lookout count from width (55′ → 15). */
-export function gableFlyRafterQty(buildingWidthFt) {
-  const W = Number(buildingWidthFt) || 30;
-  return Math.max(8, Math.round(W / 3.67));
+/**
+ * Gable fly / lookout piece count.
+ * Stations across building width at `rafterSpacing` o.c. (default 5′),
+ * ends inclusive: floor(W/sp)+1 per gable end × 2 ends.
+ * Pass a building object or (widthFt, spacingFt).
+ */
+export function gableFlyRafterQty(buildingWidthFtOrBuilding, spacingFt) {
+  let W;
+  let sp;
+  if (buildingWidthFtOrBuilding && typeof buildingWidthFtOrBuilding === 'object') {
+    const b = buildingWidthFtOrBuilding;
+    W = Number(b.width) || 30;
+    sp = Number(spacingFt != null ? spacingFt : b.rafterSpacing) || 5;
+  } else {
+    W = Number(buildingWidthFtOrBuilding) || 30;
+    sp = Number(spacingFt) || 5;
+  }
+  sp = Math.max(1, sp);
+  const perEnd = Math.max(2, Math.floor(W / sp) + 1);
+  return perEnd * 2;
 }
 
 // ── Helpers for panel slope (order) ─────────────────────────────────
@@ -790,39 +806,186 @@ export function smallShopOhHeaderCompanionQty(_b) {
   return 0;
 }
 
+/** Host-wall length for a lean (ft). */
+function leanHostWallLengthFt(b, wall) {
+  const w = wall || 'left';
+  if (w === 'front' || w === 'back') return Number(b?.width) || 0;
+  return Number(b?.length) || 0;
+}
+
+/** Effective lean span along its host wall (ft). */
+function leanSpanAlongHost(b, lt) {
+  const wallLen = leanHostWallLengthFt(b, lt?.wall);
+  const offset = Math.max(0, Number(lt?.offset) || 0);
+  if (Number(lt?.length) > 0) {
+    return Math.min(Number(lt.length), Math.max(0, wallLen - offset));
+  }
+  return Math.max(0, wallLen - offset);
+}
+
 /**
- * Corner trim stock length(s) for main building corners.
- * 12′ eave → all 14′ (eave + 2′ wrap) — benchmark 30×40.
- * 14′ eave → 2@16 + 2@12 — Levi.
- * >16′ → 20/16 mix.
+ * Enclosed lean that absorbs a main building corner — corner trim moves to the
+ * lean's outer edge. `corner` = { eave: left|right, gable: front|back }.
+ */
+export function enclosedLeanCoveringCorner(b, corner) {
+  for (const lt of b?.leanTos || []) {
+    if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
+    if (lt.enclosed === false || lt.enclosure === 'open') continue;
+    const wall = lt.wall || 'left';
+    const wallLen = leanHostWallLengthFt(b, wall);
+    const start = Math.max(0, Number(lt.offset) || 0);
+    const end = start + leanSpanAlongHost(b, lt);
+    if (wall === 'left' || wall === 'right') {
+      if (wall !== corner.eave) continue;
+      const along = corner.gable === 'front' ? 0 : wallLen;
+      if (along >= start - 0.2 && along <= end + 0.2) return lt;
+    } else if (wall === 'front' || wall === 'back') {
+      if (wall !== corner.gable) continue;
+      const along = corner.eave === 'left' ? 0 : wallLen;
+      if (along >= start - 0.2 && along <= end + 0.2) return lt;
+    }
+  }
+  return null;
+}
+
+/** True when an enclosed lean covers this main wall (host face under lean roof). */
+export function mainWallHasEnclosedLean(b, wall) {
+  return (b?.leanTos || []).some(
+    (lt) =>
+      lt &&
+      lt.wall === wall &&
+      (Number(lt.depth) || 0) > 0.1 &&
+      lt.enclosed !== false &&
+      lt.enclosure !== 'open',
+  );
+}
+
+/**
+ * Plan-view sites for vertical corner trim.
+ * Enclosed lean: corners on that wall relocate to the lean OUTER edge and use
+ * the lean outer eave height for stock length (aligns metal/trim with lean).
+ *
+ * @returns {{ x:number, z:number, ox:number, oz:number, eaveH:number, walls:string[], source:'main'|'lean' }[]}
+ */
+export function buildingCornerTrimSites(b) {
+  const W = Number(b?.width) || 0;
+  const L = Number(b?.length) || 0;
+  const mainE = Number(b?.eaveHeight) || 12;
+  const open = new Set(Array.isArray(b?.openWalls) ? b.openWalls : []);
+
+  const mainCorners = [
+    { x: 0, z: 0, ox: -1, oz: -1, eave: 'left', gable: 'front', walls: ['front', 'left'] },
+    { x: W, z: 0, ox: 1, oz: -1, eave: 'right', gable: 'front', walls: ['front', 'right'] },
+    { x: 0, z: L, ox: -1, oz: 1, eave: 'left', gable: 'back', walls: ['back', 'left'] },
+    { x: W, z: L, ox: 1, oz: 1, eave: 'right', gable: 'back', walls: ['back', 'right'] },
+  ];
+
+  const sites = [];
+  for (const c of mainCorners) {
+    if (open.has(c.eave) && open.has(c.gable)) continue;
+    const lean = enclosedLeanCoveringCorner(b, c);
+    if (lean) {
+      const depth = Number(lean.depth) || 0;
+      const leanEave = Number(lean.eaveHeight) || 10;
+      let x = c.x;
+      let z = c.z;
+      // Project main corner out to lean outer face
+      if (lean.wall === 'left') x = -depth;
+      else if (lean.wall === 'right') x = W + depth;
+      else if (lean.wall === 'front') z = -depth;
+      else if (lean.wall === 'back') z = L + depth;
+      // Keep the gable/eave end this corner belongs to (clamped to lean span)
+      if (lean.wall === 'left' || lean.wall === 'right') {
+        z = c.gable === 'front' ? 0 : L;
+        const start = Math.max(0, Number(lean.offset) || 0);
+        const end = start + leanSpanAlongHost(b, lean);
+        z = Math.max(start, Math.min(end, z));
+      } else {
+        x = c.eave === 'left' ? 0 : W;
+        const start = Math.max(0, Number(lean.offset) || 0);
+        const end = start + leanSpanAlongHost(b, lean);
+        x = Math.max(start, Math.min(end, x));
+      }
+      sites.push({
+        x,
+        z,
+        ox: c.ox,
+        oz: c.oz,
+        eaveH: leanEave,
+        walls: c.walls,
+        source: 'lean',
+      });
+    } else {
+      sites.push({
+        x: c.x,
+        z: c.z,
+        ox: c.ox,
+        oz: c.oz,
+        eaveH: mainE,
+        walls: c.walls,
+        source: 'main',
+      });
+    }
+  }
+  return sites;
+}
+
+/**
+ * Corner trim stock length(s).
+ * Enclosed lean: absorbed main corners move to lean outer edge and size from
+ * lean outer eave (e.g. 10′ lean → 12′ = eave + 2′ wrap), not main eave.
+ *
+ * ≤12′ eave → eave+2′; 12–16′ → 16/12 mix; >16′ → 20/16 mix.
  * @returns {{ lengthFt: number, qty: number }[]}
  */
 export function mainCornerTrimPack(b) {
-  const eaveH = Number(b?.eaveHeight) || 12;
-  const openCount = ['front', 'back', 'left', 'right'].filter((w) => {
-    const ow = b?.openWalls;
-    return Array.isArray(ow) && ow.includes(w);
-  }).length;
-  // Fallback: if openWalls missing, assume 4 corners
-  const corners = Math.max(2, 4 - Math.floor(openCount / 2));
+  const sites = buildingCornerTrimSites(b);
+  if (!sites.length) {
+    const eaveH = Number(b?.eaveHeight) || 12;
+    const openCount = ['front', 'back', 'left', 'right'].filter((w) => {
+      const ow = b?.openWalls;
+      return Array.isArray(ow) && ow.includes(w);
+    }).length;
+    const corners = Math.max(2, 4 - Math.floor(openCount / 2));
+    if (eaveH > 16) {
+      const n20 = Math.ceil(corners / 2);
+      return [
+        { lengthFt: 20, qty: n20 },
+        { lengthFt: 16, qty: corners - n20 },
+      ].filter((r) => r.qty > 0);
+    }
+    if (eaveH > 12) {
+      const n16 = Math.ceil(corners / 2);
+      return [
+        { lengthFt: 16, qty: n16 },
+        { lengthFt: 12, qty: corners - n16 },
+      ].filter((r) => r.qty > 0);
+    }
+    return [{ lengthFt: Math.ceil(eaveH + 2 - 1e-9), qty: corners }];
+  }
 
-  if (eaveH > 16) {
-    const n20 = Math.ceil(corners / 2);
-    return [
-      { lengthFt: 20, qty: n20 },
-      { lengthFt: 16, qty: corners - n20 },
-    ].filter((r) => r.qty > 0);
+  const byLen = new Map();
+  const tall = [];
+  for (const s of sites) {
+    const h = Number(s.eaveH) || 12;
+    if (h > 16) {
+      byLen.set(20, (byLen.get(20) || 0) + 1);
+    } else if (h > 12) {
+      tall.push(h);
+    } else {
+      const len = Math.ceil(h + 2 - 1e-9);
+      byLen.set(len, (byLen.get(len) || 0) + 1);
+    }
   }
-  if (eaveH > 12) {
-    const n16 = Math.ceil(corners / 2);
-    return [
-      { lengthFt: 16, qty: n16 },
-      { lengthFt: 12, qty: corners - n16 },
-    ].filter((r) => r.qty > 0);
+  if (tall.length) {
+    const n16 = Math.ceil(tall.length / 2);
+    byLen.set(16, (byLen.get(16) || 0) + n16);
+    byLen.set(12, (byLen.get(12) || 0) + (tall.length - n16));
   }
-  // ≤12′ eave: all corners eave + 2′ (production wrap above eave)
-  const len = Math.ceil(eaveH + 2 - 1e-9);
-  return [{ lengthFt: len, qty: corners }];
+  return [...byLen.entries()]
+    .map(([lengthFt, qty]) => ({ lengthFt, qty }))
+    .filter((r) => r.qty > 0)
+    .sort((a, b) => b.lengthFt - a.lengthFt);
 }
 
 /**

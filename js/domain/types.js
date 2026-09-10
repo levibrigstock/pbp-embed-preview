@@ -276,6 +276,26 @@ export function createLeanTo(partial = {}) {
  pitch: partial.pitch ?? partial._mainPitch ?? 4,
  /** Lean post spacing o.c. (ft). Defaults to 10 — independent of main building. */
  postSpacing: partial.postSpacing ?? 10,
+ /**
+     * Attachment ledger on the main wall (entire lean length). Standard 2x8;
+     * changeable. 2-ply so lean rafters / purlins seat like a carrier.
+     */
+ ledgerSize: ['2x6', '2x8', '2x10', '2x12'].includes(partial.ledgerSize)
+ ? partial.ledgerSize
+ : '2x8',
+ /**
+     * Outer eave rafter bearer (replaces lean sub-fascia). 2-ply on each side of
+     * the outer posts — same idea as main truss bearers. Default 2x10.
+     */
+ rafterBearerSize: ['2x6', '2x8', '2x10', '2x12'].includes(partial.rafterBearerSize)
+ ? partial.rafterBearerSize
+ : partial._mainTrussCarrierSize || '2x10',
+ /**
+     * Shed lean: metal in the end triangles formed by corner cross-bracing
+     * (outer corner back to main wall under the roof rake). Default on.
+     * When false: no end-filler / upper-triangle metal in takeoff or 3D.
+     */
+ endTriangleMetal: partial.endTriangleMetal !== false,
  /** Snap ends to nearest main-wall posts (default off — custom lean lengths OK) */
  snapToPosts: partial.snapToPosts ?? false,
  /**
@@ -417,6 +437,15 @@ export function createBuilding(partial = {}) {
  /** Embedment / hole depth below grade (ft). Typical frost range 3–6. */
  postDepthFt: partial.postDepthFt ?? 3,
  trussSpacing: partial.trussSpacing ?? 5,
+ /**
+   * Gable fly / lookout rafter spacing o.c. (ft). Default 5′.
+   * Qty = (floor(width / spacing) + 1) × 2 gable ends.
+   */
+ rafterSpacing: partial.rafterSpacing ?? 5,
+ /** Gable fly / lookout lumber. Standard 2x8. */
+ rafterSize: ['2x6', '2x8', '2x10', '2x12'].includes(partial.rafterSize)
+ ? partial.rafterSize
+ : '2x8',
  girtSpacingIn: partial.girtSpacingIn ?? 24,
  purlinSpacingIn: partial.purlinSpacingIn ?? 24,
  postSize: partial.postSize || '6x6',

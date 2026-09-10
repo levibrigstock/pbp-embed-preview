@@ -42,7 +42,7 @@ import {
   PUBLIC_SCHEMA_VERSION,
 } from './publicConfig.js';
 
-import { createProject } from '../domain/types.js?v=20260909t';
+import { createProject } from '../domain/types.js?v=20260910h';
 
 const $ = (id) => document.getElementById(id);
 
@@ -152,7 +152,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260909u');
+    const { SceneView } = await import('../render/scene.js?v=20260910i');
     // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,

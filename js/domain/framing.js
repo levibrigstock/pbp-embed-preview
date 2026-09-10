@@ -21,7 +21,7 @@ import {
  isLeanFaceOpen,
  leanOpenFaceList,
  roundFtToNearestInch,
-} from './types.js?v=20260909t';
+} from './types.js?v=20260910h';
 import {
  useFullGirtPackage,
  girtPackMode,
@@ -34,7 +34,7 @@ import {
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260909t';
+} from './productionPolicy.js?v=20260910h';
 
 /**
  * Place posts on a wall line, including both ends.
@@ -1101,15 +1101,22 @@ export function computeLeanToMaterials(b, lean, dims) {
  }
  const purlinLf = purlinRows * purlinRunFt;
 
- // --- Attachment ledger / truss bearer at main wall (always) ---
- // 2-ply carrier like main eaves so purlins seat properly
+ // --- Attachment ledger at main wall (always) — 2-ply, standard 2x8 ---
  const ledgerPlies = 2;
  const ledgerLf = ledgerPlies * length;
- const ledgerSize = b.trussCarrierSize || '2x10';
+ const ledgerSize = ['2x6', '2x8', '2x10', '2x12'].includes(lean.ledgerSize)
+ ? lean.ledgerSize
+ : '2x8';
 
- // --- Outer eave sub-fascia (always) ---
- const subFasciaLf = length;
- // Gable lean also needs outer eave; both eaves on gable = outer only for attach (inner is main)
+ // --- Outer eave rafter bearer (always) — 2-ply 2x10 like main truss bearers ---
+ // Replaces the old single 2x6 lean sub-fascia line.
+ const outerBearerPlies = 2;
+ const outerBearerLf = outerBearerPlies * length;
+ const outerBearerSize = ['2x6', '2x8', '2x10', '2x12'].includes(lean.rafterBearerSize)
+ ? lean.rafterBearerSize
+ : b.trussCarrierSize || '2x10';
+ // Back-compat alias for callers still reading subFasciaLf
+ const subFasciaLf = 0;
 
  // Open faces on enclosed lean (drive-through) — skip metal/girts/base on those faces
  const openOuter = isLeanFaceOpen(lean, 'outer');
@@ -1256,6 +1263,9 @@ export function computeLeanToMaterials(b, lean, dims) {
  ledgerPlies,
  ledgerLf,
  ledgerSize,
+ outerBearerPlies,
+ outerBearerLf,
+ outerBearerSize,
  subFasciaLf,
  girtRows,
  girtLf,
@@ -1751,14 +1761,28 @@ export function generateFraming(b) {
  let leanGirtLf = 0;
  let leanPurlinLf = 0;
  let leanLedgerLf = 0;
- let leanSubFasciaLf = 0;
+ let leanOuterBearerLf = 0;
+ /** @type {Map<string, number>} size → lf for attach ledgers */
+ const leanLedgerBySize = new Map();
+ /** @type {Map<string, number>} size → lf for outer rafter bearers */
+ const leanOuterBearerBySize = new Map();
  for (const pkg of leanPackages) {
  const m = pkg.materials || computeLeanToMaterials(b, pkg.lean, pkg);
  leanGirtLf += m.girtLf || 0;
  leanPurlinLf += m.purlinLf || 0;
  leanLedgerLf += m.ledgerLf || 0;
- leanSubFasciaLf += m.subFasciaLf || 0;
+ leanOuterBearerLf += m.outerBearerLf || 0;
+ if ((m.ledgerLf || 0) > 0) {
+ const sz = m.ledgerSize || '2x8';
+ leanLedgerBySize.set(sz, (leanLedgerBySize.get(sz) || 0) + m.ledgerLf);
  }
+ if ((m.outerBearerLf || 0) > 0) {
+ const sz = m.outerBearerSize || b.trussCarrierSize || '2x10';
+ leanOuterBearerBySize.set(sz, (leanOuterBearerBySize.get(sz) || 0) + m.outerBearerLf);
+ }
+ }
+ // Legacy alias — lean sub-fascia removed (outer is rafter bearer now)
+ const leanSubFasciaLf = 0;
 
  // Perma-column + gable-extension (Jim): remap CCA sleeve lengths toward benchmark
  // 16@14 / 14@18 / 15@20 / 2@22 / 2@24 without changing station count.
@@ -1829,6 +1853,9 @@ export function generateFraming(b) {
  leanGirtLf,
  leanPurlinLf,
  leanLedgerLf,
+ leanOuterBearerLf,
+ leanLedgerBySize,
+ leanOuterBearerBySize,
  leanSubFasciaLf,
  leanSkirtLf: skirt.runs?.filter((r) => r.lengthFt > 0).length || 0,
  roofRise: roofRise(b),

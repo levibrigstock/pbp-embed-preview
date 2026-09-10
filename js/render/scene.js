@@ -2219,7 +2219,7 @@ export class SceneView {
  }
 
  if (b.roofStyle === 'gable') this._addGableRoof(group, b, W, L, H, rise, oh, wallHex, roofHex);
- else this._addMonoRoof(group, b, W, L, H, rise, oh, roofHex);
+ else this._addMonoRoof(group, b, W, L, H, rise, oh, roofHex, wallHex);
 
  // Full roof-perimeter trim package (matches production 3D: continuous eave,
  // rake on roof edge, corners to eave, ridge). See _addRoofPerimeterTrim.
@@ -2789,7 +2789,7 @@ export class SceneView {
  }
  }
 
- _addMonoRoof(group, b, W, L, H, rise, oh, roofHex) {
+ _addMonoRoof(group, b, W, L, H, rise, oh, roofHex, wallHex) {
  // U = across slope, V = along eave — ribs // eave (same language as gable)
  const roofMat = this._agPanelMat(
  roofHex,
@@ -2810,6 +2810,85 @@ export class SceneView {
  'eave',
  );
  this._addRoofSurfaceRibs(group, b, W, L, H, rise, oh, roofHex, 'mono');
+
+ this._addMonoWallUpperMetal(group, b, W, L, H, rise, wallHex);
+ }
+
+ /**
+  * Wall metal above the eave on a mono slope.
+  *
+  * _addBuildingSkin builds all four walls flat to eave height H, and only the
+  * gable path ever added anything above that. On a mono the roof runs from
+  * H + rise at x=0 down to H at x=W, so three walls were left short: the high
+  * side by a full L x rise strip, and both ends by a triangle each. The result
+  * was a roof floating over open air, touching the walls only along the low
+  * edge.
+  *
+  * Ends are right triangles with the high corner at x=0 — not the centre peak a
+  * gable end has. The high side is a plain rectangle because the roof height is
+  * constant along it.
+  */
+ _addMonoWallUpperMetal(group, b, W, L, H, rise, wallHex) {
+ if (rise < 0.25) return;
+ const thick = 0.16;
+ const half = thick / 2;
+ const topY = H + rise;
+
+ // ── Ends: triangle from eave up to the slope ──
+ const endMat = this._agPanelMat(
+ wallHex,
+ W,
+ topY,
+ this._wallPanelOpts({ worldU0: 0, worldV0: 0, side: THREE.DoubleSide }),
+ );
+ for (const [wall, z] of [
+ ['front', 0.05],
+ ['back', L - 0.05],
+ ]) {
+ // Closed walls overlap the lower panel slightly; open ones sit on the eave.
+ const yBot = isWallOpen(b, wall) ? H : H - 0.05;
+ const positions = [];
+ const uvs = [];
+ const face = (zz, mirrorU) => {
+ for (const [x, y] of [
+ [0, yBot],
+ [W, yBot],
+ [0, topY + 0.04],
+ ]) {
+ positions.push(x, y, zz);
+ uvs.push(mirrorU ? 1 - x / W : x / W, y / topY);
+ }
+ };
+ const mirror = wall === 'front';
+ face(z - half, mirror);
+ face(z + half, mirror);
+ const geo = new THREE.BufferGeometry();
+ geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+ geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+ geo.computeVertexNormals();
+ const mesh = new THREE.Mesh(geo, endMat);
+ mesh.castShadow = true;
+ mesh.receiveShadow = true;
+ mesh.userData = { kind: 'wall', host: 'main', face: 'main', buildingId: b.id, wall };
+ group.add(mesh);
+ }
+
+ // ── High side: rectangle, roof height is constant along this wall ──
+ const highOpen = isWallOpen(b, 'left');
+ const yBot = highOpen ? H : H - 0.05;
+ const hgt = Math.max(0.01, topY + 0.04 - yBot);
+ const sideMat = this._agPanelMat(
+ wallHex,
+ L,
+ topY,
+ this._wallPanelOpts({ worldU0: 0, worldV0: 0, side: THREE.DoubleSide }),
+ );
+ const side = new THREE.Mesh(new THREE.BoxGeometry(thick, hgt, L), sideMat);
+ side.position.set(0.05, yBot + hgt / 2, L / 2);
+ side.castShadow = true;
+ side.receiveShadow = true;
+ side.userData = { kind: 'wall', host: 'main', face: 'main', buildingId: b.id, wall: 'left' };
+ group.add(side);
  }
 
  /**

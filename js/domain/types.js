@@ -433,6 +433,15 @@ export function createBuilding(partial = {}) {
  eaveHeight: partial.eaveHeight ?? 12,
  pitch: partial.pitch ?? 4,
  roofStyle: partial.roofStyle || 'gable', // gable | mono
+ /**
+   * Roof truss style drawn in 3D / noted on takeoff:
+   * common | scissor | attic | parallelChord
+   */
+ trussType: ['common', 'scissor', 'attic', 'parallelChord'].includes(partial.trussType)
+ ? partial.trussType
+ : 'common',
+ /** Parallel-chord / attic depth helper (ft). Default 3.5′. */
+ trussDepthFt: partial.trussDepthFt ?? 3.5,
  postSpacing: partial.postSpacing ?? 10,
  /** Embedment / hole depth below grade (ft). Typical frost range 3–6. */
  postDepthFt: partial.postDepthFt ?? 3,

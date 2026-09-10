@@ -22,9 +22,11 @@ import {
  wallPanelBelowFloorIn,
  buildingCornerTrimSites,
  mainWallHasEnclosedLean,
+ enclosedLeanCoveringCorner,
  includeFullFramingExtras,
  gableFlyRafterQty,
-} from '../domain/productionPolicy.js?v=20260910h';
+} from '../domain/productionPolicy.js?v=20260910q';
+import { trussMemberLayout } from '../domain/trussTypes.js?v=20260910u';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
@@ -991,12 +993,11 @@ export class SceneView {
  }
 
  /**
-   * Roof skin look — match walls so roof hue reads as clearly as sidewalls.
-   * Lite shares wall matte params; desktop uses wall-like metal (color-true).
+   * Roof skin look — match walls for color/metal, but rotate ag-panel UVs 90°
+   * so ribs run eave→ridge (up the slope) instead of parallel to the ridge.
    */
  _roofPanelOpts(extra = {}) {
- // Prefer sharing wall opts so lite phones get the same matte + emissive path.
- return this._wallPanelOpts(extra);
+ return this._wallPanelOpts({ rotate90: true, ...extra });
  }
 
  /**
@@ -2406,9 +2407,21 @@ export class SceneView {
  const angSign = side < 0 ? 1 : -1;
 
  // ── 1) Wall-face rake band (matches eave top-of-wall band) ──
- // Starts at corner leg, runs to just shy of peak so peak join sits clean.
+ // Normally insets by `leg` so the main corner L covers the last bit.
+ // When an enclosed lean absorbs that corner (L moves to lean outer), run
+ // the rake all the way to the building edge or a dark gap appears.
  if (!isWallOpen(b, end.wall)) {
- const x0 = side < 0 ? leg - T * 1.2 : W - (leg - T * 1.2);
+ const absorbed = !!enclosedLeanCoveringCorner(b, {
+ eave: side < 0 ? 'left' : 'right',
+ gable: end.wall,
+ });
+ const x0 = absorbed
+ ? side < 0
+ ? 0
+ : W
+ : side < 0
+ ? leg - T * 1.2
+ : W - (leg - T * 1.2);
  const x1 = xRidge + (side < 0 ? -0.06 : 0.06);
  const run = Math.abs(x1 - x0);
  const bandLen = Math.hypot(run, rise * (run / Math.max(W / 2, 0.01)));
@@ -2547,10 +2560,10 @@ export class SceneView {
 
 
  /**
-   * Main gable roof. Ribs // ridge (along building length) — matches target reference.
+   * Main gable roof. Ribs run eave→ridge (up the slope).
    */
  _addGableRoof(group, b, W, L, H, rise, oh, wallHex, roofHex) {
- // U = across slope (eave→ridge), V = along eave — texture ribs run // ridge
+ // U = across slope (eave→ridge), V = along eave; rotate90 → ribs up the slope
  const roofMat = this._agPanelMat(
  roofHex,
  W / 2 + oh,
@@ -2585,7 +2598,7 @@ export class SceneView {
  'eave',
  );
 
- // Geometric ribs // ridge (along L)
+ // Geometric ribs eave→ridge, spaced along the building length
  this._addRoofSurfaceRibs(group, b, W, L, H, rise, oh, roofHex, 'gable');
 
  this._addGableEndUpperMetal(group, b, W, L, H, rise, wallHex);
@@ -2790,7 +2803,7 @@ export class SceneView {
  }
 
  _addMonoRoof(group, b, W, L, H, rise, oh, roofHex, wallHex) {
- // U = across slope, V = along eave — ribs // eave (same language as gable)
+ // U = across slope, V = along eave; rotate90 → ribs eave→ridge
  const roofMat = this._agPanelMat(
  roofHex,
  W + oh * 2,
@@ -2940,8 +2953,7 @@ export class SceneView {
  }
 
  /**
-   * Raised roof ribs // ridge (along building length), spaced down the slope.
-   * Matches target reference main + gable lean metal language.
+   * Raised roof ribs running eave→ridge (up the slope), spaced along the eave.
    */
  _addRoofSurfaceRibs(group, b, W, L, H, rise, oh, roofHex, style) {
  const ribMat = this._metalMat(new THREE.Color(roofHex).offsetHSL(0, 0, 0.08).getHex(), {
@@ -2949,35 +2961,38 @@ export class SceneView {
  metalness: this.lite ? 0.05 : 0.9,
  roughness: this.lite ? 0.78 : 0.25,
  });
- const along = L + oh * 2;
+ const z0 = -oh;
+ const z1 = L + oh;
+ const along = Math.max(1, z1 - z0);
+ const spacing = 0.75;
+ const n = Math.max(2, Math.round(along / spacing));
+ const placeSlopeRib = (x0, y0, x1, y1, z) => {
+ const dx = x1 - x0;
+ const dy = y1 - y0;
+ const len = Math.hypot(dx, dy);
+ if (len < 0.4) return;
+ const rib = new THREE.Mesh(
+ new THREE.BoxGeometry(0.065, 0.05, len * 0.97),
+ ribMat,
+ );
+ rib.position.set((x0 + x1) / 2, (y0 + y1) / 2 + 0.03, z);
+ const dir = new THREE.Vector3(dx, dy, 0);
+ if (dir.lengthSq() > 1e-10) {
+ rib.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.normalize());
+ }
+ rib.castShadow = false;
+ group.add(rib);
+ };
+ for (let i = 0; i <= n; i++) {
+ const z = z0 + (i / n) * along;
  if (style === 'gable') {
- for (const side of [-1, 1]) {
- const half = W / 2 + oh;
- const steps = Math.max(4, Math.floor(half / 0.75));
- const tMax = Math.max(0.7, 1 - 0.9 / Math.max(half, 0.01));
- for (let i = 0; i <= steps; i++) {
- const t = i / steps;
- if (t > tMax) continue;
- const x = side < 0 ? -oh + t * (W / 2 + oh) : W + oh - t * (W / 2 + oh);
- const y = H + t * rise + 0.05;
- const rib = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, along * 0.98), ribMat);
- rib.position.set(x, y, L / 2);
- const ang = Math.atan2(rise, W / 2 + oh);
- rib.rotation.z = side < 0 ? ang : -ang;
- group.add(rib);
- }
- }
+ // Left slope: left eave → ridge
+ placeSlopeRib(-oh, H + 0.05, W / 2, H + rise + 0.05, z);
+ // Right slope: right eave → ridge
+ placeSlopeRib(W + oh, H + 0.05, W / 2, H + rise + 0.05, z);
  } else {
- const span = W + oh * 2;
- const steps = Math.max(4, Math.floor(span / 0.75));
- for (let i = 0; i <= steps; i++) {
- const t = i / steps;
- const x = -oh + t * span;
- const y = H + rise * (1 - t) + 0.05;
- const rib = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, along * 0.98), ribMat);
- rib.position.set(x, y, L / 2);
- rib.rotation.z = -Math.atan2(rise, span);
- group.add(rib);
+ // Mono: high eave (−X) → low eave (+X)
+ placeSlopeRib(-oh, H + rise + 0.05, W + oh, H + 0.05, z);
  }
  }
  }
@@ -4042,12 +4057,10 @@ export class SceneView {
 
 
  /**
-   * Lean roof metal — same language as main (ribs // ridge / along eave).
-   * Matches target gable-lean reference: lean metal continues main rib direction.
+   * Lean roof metal — same language as main (ribs eave→ridge / up the slope).
    *
-   * Texture ribs run along V:
-   *   U = across slope (attach → outer)
-   *   V = along eave (lean length)
+   * Texture: U = across slope (attach → outer), V = along eave; rotate90 so
+   * ribs run up the slope. Raised ribs match via _addLeanRoofSlopeRibs.
    *
    * Callers: ftAcross = slope run ft, ftAlong = eave length ft.
    */
@@ -4096,7 +4109,7 @@ export class SceneView {
  3,
  ),
  );
- // UV: c0(0,0) c1(1,0) c2(1,1) c3(0,1) — U=slope, V=eave (// main ridge)
+ // UV: c0(0,0) c1(1,0) c2(1,1) c3(0,1) — U=slope, V=eave
  geo.setAttribute(
  'uv',
  new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2),
@@ -4113,7 +4126,8 @@ export class SceneView {
  mesh.receiveShadow = true;
  group.add(mesh);
 
- this._addLeanRoofSurfaceRibs(
+ // Raised ribs up the slope (attach → outer), spaced along the lean eave
+ this._addLeanRoofSlopeRibs(
  group,
  attachA,
  attachB,
@@ -4121,8 +4135,6 @@ export class SceneView {
  outerB,
  yAttachA,
  yOuterA,
- yAttachB,
- yOuterB,
  roofHex,
  );
  return mesh;
@@ -5612,49 +5624,85 @@ export class SceneView {
  group.add(bearer);
  }
 
- // Trusses — never at exact gable plane; inset along length
+ // Trusses — never at exact gable plane; inset along length.
+ // Style from building.trussType: common | scissor | attic | parallelChord
  const count = Math.max(2, framing.trusses?.count || 2);
+
+ // Roof line at x, and how far a top chord's CENTRE must drop so its upper
+ // FACE stays under the metal.
+ //
+ // underRoof on its own is not enough. It was applied to the high end only —
+ // the low end of a mono rafter got 0.04, which is nothing — and it ignores
+ // the chord's own depth: a beam rotated onto the slope has its top face
+ // parallel to the roof at half its depth measured PERPENDICULAR, a larger
+ // vertical distance than half its depth. Together those let 2x lumber
+ // surface through the roof metal as light bars across the finished roof.
+ const isMono = (b.roofStyle || 'gable') === 'mono';
+ const roofYAt = (x) =>
+ isMono
+ ? H + rise * (1 - Math.max(0, Math.min(1, x / W)))
+ : H + rise * (1 - Math.min(1, Math.abs(x - W / 2) / (W / 2)));
+ const chordAng = Math.atan2(rise, isMono ? W : W / 2);
+ const chordDrop = underRoof + 0.18 / 2 / Math.max(0.2, Math.cos(chordAng));
+
+ const ridgeY = H + rise - chordDrop;
+ const eaveY = H - 0.04;
+ const layout =
+ (b.roofStyle || 'gable') === 'gable'
+ ? trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof })
+ : null;
  for (let i = 0; i < count; i++) {
- // Map stations into [z0, z1] so end trusses stay inside gable metal
  const t = count === 1 ? 0.5 : i / (count - 1);
  const z = z0 + t * (z1 - z0);
- if ((b.roofStyle || 'gable') === 'gable') {
- const ridgeY = H + rise - underRoof;
- const eaveY = H - 0.04;
- // Top chords stop short of walls
- this._woodBeam(group, xL, eaveY, z, W / 2, ridgeY, z, trussMat, 0.13, 0.18);
- this._woodBeam(group, W / 2, ridgeY, z, xR, eaveY, z, trussMat, 0.13, 0.18);
- // Bottom chord
- this._woodBeam(group, xL + 0.05, eaveY, z, xR - 0.05, eaveY, z, trussMat, 0.11, 0.16);
- // Webs
+ if (layout) {
+ for (const seg of layout.top) {
  this._woodBeam(
  group,
- W * 0.28,
- eaveY,
+ seg[0][0],
+ seg[0][1],
  z,
- W / 2,
- H + rise * 0.5 - underRoof,
+ seg[1][0],
+ seg[1][1],
+ z,
+ trussMat,
+ 0.13,
+ 0.18,
+ );
+ }
+ for (const seg of layout.bottom) {
+ this._woodBeam(
+ group,
+ seg[0][0],
+ seg[0][1],
+ z,
+ seg[1][0],
+ seg[1][1],
+ z,
+ trussMat,
+ 0.11,
+ 0.16,
+ );
+ }
+ for (const seg of layout.webs) {
+ this._woodBeam(
+ group,
+ seg[0][0],
+ seg[0][1],
+ z,
+ seg[1][0],
+ seg[1][1],
  z,
  trussMat,
  0.08,
  0.1,
  );
- this._woodBeam(
- group,
- W * 0.72,
- eaveY,
- z,
- W / 2,
- H + rise * 0.5 - underRoof,
- z,
- trussMat,
- 0.08,
- 0.1,
- );
- this._woodBeam(group, W / 2, eaveY, z, W / 2, ridgeY, z, trussMat, 0.09, 0.09);
+ }
  } else {
- const yHigh = H + rise - underRoof;
- const yLow = H - 0.04;
+ // Mono: single top chord + flat bottom. Both ends come off the roof
+ // line at their own x, so the rafter stays parallel to and under the
+ // deck for its whole run instead of rising into it at the low end.
+ const yHigh = roofYAt(xL) - chordDrop;
+ const yLow = roofYAt(xR) - chordDrop;
  this._woodBeam(group, xL, yHigh, z, xR, yLow, z, trussMat, 0.13, 0.18);
  this._woodBeam(group, xL + 0.05, H - 0.04, z, xR - 0.05, H - 0.04, z, trussMat, 0.11, 0.14);
  }
@@ -5707,10 +5755,14 @@ export class SceneView {
  /**
    * Gable overhang framing: lookout rafters (Rafter) + rake end rafters (EndRafter).
    * Same gate as takeoff `includeFullFramingExtras` / gableFlyRafterQty.
+   * Skin-only sales view: skip — these beams sit outside the gable wall and
+   * poke through rake fascia/soffit (especially once an enclosed lean turns
+   * on the full framing package). Show them in Frame view or with metal off.
    */
  _addGableFlyRafters(group, b, mat) {
  if ((b.roofStyle || 'gable') !== 'gable') return;
  if (!includeFullFramingExtras(b)) return;
+ if (this.showMetal && !this.showFraming) return;
  const W = b.width * FT;
  const L = b.length * FT;
  const H = b.eaveHeight * FT;

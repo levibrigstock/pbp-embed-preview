@@ -86,12 +86,13 @@ export const LEAN_FACE_LABELS = {
 };
 
 /**
- * Faces opened on an enclosed lean-to (no metal/girts/mid-posts on that face).
- * Fully open (non-enclosed) leans treat all faces as open for materials.
+ * Faces with no wall metal / girts / mid-posts.
+ * Open (carport) leans: outer eave is open; END walls still get metal
+ * (the white rake/side panels in sales photos). Enclosed leans use openFaces.
  */
 export function leanOpenFaceList(lean) {
  if (!lean) return [];
- if (!isLeanEnclosed(lean)) return [...LEAN_FACES];
+ if (!isLeanEnclosed(lean)) return ['outer'];
  const raw = Array.isArray(lean.openFaces) ? lean.openFaces : [];
  return LEAN_FACES.filter((f) => raw.includes(f));
 }
@@ -212,7 +213,7 @@ export function formatOpeningSize(w, h) {
  *
  * Dimensions: depth = out from wall, length = along wall (0 = full wall).
  * Enclosure: enclosed = wall metal + girts on outer + both ends;
- *            open = posts + roof only (carport style).
+ *            open = carport style — outer eave open, END walls still metalled.
  */
 /** Round feet to nearest 1" (production cut heights: 11'4" not 11.3'). */
 export function roundFtToNearestInch(ft) {
@@ -300,13 +301,13 @@ export function createLeanTo(partial = {}) {
  snapToPosts: partial.snapToPosts ?? false,
  /**
      * true = wall metal + girts on outer eave + both end walls.
-     * false = open (posts + roof only; carport / open lean-to).
+     * false = open carport — outer eave open; END walls still metalled.
      */
  enclosed,
  /**
      * Per-face open walls on an enclosed lean (drive-through).
      * Values: 'outer' | 'leftEnd' | 'rightEnd'
-     * Fully open leans (enclosed=false) ignore this — all faces are open.
+     * Open leans (enclosed=false) always treat outer as open; ends stay metalled.
      */
  openFaces: Array.isArray(partial.openFaces)
  ? partial.openFaces.filter((f) => ['outer', 'leftEnd', 'rightEnd'].includes(f))

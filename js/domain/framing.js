@@ -1189,18 +1189,17 @@ export function computeLeanToMaterials(b, lean, dims) {
  const leanAddIn = leanOrderSlope < 20 ? 1.5 : 2;
  const roofPanelLen = Math.round((leanOrderSlope + leanAddIn / 12) * 12) / 12;
 
- // --- Wall metal (closed enclosed faces only) ---
+ // --- Wall metal (closed faces) ---
+ // Open carport leans: outer open, but END walls still get metal (sales photos).
  // Upper panels stop at wainscot top when wainscot is on (band counted separately)
  let wallPanelLf = 0; // linear feet of wall coverage (divide by 3 for qty)
  let wallPanelLen = outerH + 1; // stock panel length (upper wall)
- if (enclosed) {
  if (wainH > 0) {
  wallPanelLen = Math.max(0.5, outerH - wainH + 1);
  }
  if (!openOuter) wallPanelLf += length;
  if (!openLeft) wallPanelLf += depth;
  if (!openRight) wallPanelLf += depth;
- }
  // Wainscot LF along closed lean faces (enclosed + wainscot only)
  let wainscotLf = 0;
  if (enclosed && wainH > 0) {

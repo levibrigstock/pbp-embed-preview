@@ -26,7 +26,8 @@ import {
  includeFullFramingExtras,
  gableFlyRafterQty,
 } from '../domain/productionPolicy.js?v=20260910q';
-import { trussMemberLayout } from '../domain/trussTypes.js?v=20260916d';
+import { trussMemberLayout } from '../domain/trussTypes.js?v=20260916k';
+import { gableLeanGeometry, gableLeanValley } from '../domain/gableLean.js?v=20260916k';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
@@ -65,6 +66,25 @@ function formatOpeningLabel(w, h) {
 }
 
 // Keep in sync with js/public/publicConfig.js PUBLIC_COLORS (first-pass; chip-lock later).
+/**
+ * Oil-canning depth in the panel shade map: the soft waviness real ag panel
+ * gets between fasteners. It is shading only — the rib normals are separate.
+ *
+ * At 0.04 it reads as blotching rather than sheen, and large walls look warped
+ * rather than flat. 0 is a dead-flat sheet. Kept as one named constant so the
+ * look is a dial, not a number buried in a texture loop.
+ */
+const OIL_CANNING = 0.04;
+
+/**
+ * Overlap added to a trim run so butt joints do not show a hairline gap.
+ *
+ * Constant feet, not a percentage. These were scaled (len * 1.02 and friends),
+ * which is invisible on a short piece and half a foot of trim hanging past the
+ * corner on a 60' lean eave — the overshoot grew with the building.
+ */
+const TRIM_LAP = 0.04;
+
 const COLOR_HEX = {
  BK: 0x0e0e10,
  AL: 0xf3e6c8,
@@ -863,7 +883,9 @@ export class SceneView {
  const screwCols = [0.08, 0.5, 0.92];
  // One extra entry so the normal map can read the next column's rib height.
  const ribU = new Float64Array(W + 1);
- const oilU = new Float64Array(W);
+ // W+1 like ribU: the normal map needs the next column's oil term too,
+ // otherwise the derivative mixes two different surfaces (see below).
+ const oilU = new Float64Array(W + 1);
  const seamU = new Float64Array(W);
  const screwColU = new Uint8Array(W);
  for (let x = 0; x <= W; x++) {
@@ -881,9 +903,9 @@ export class SceneView {
  profile = Math.max(profile, Math.exp(-Math.pow(d / 0.018, 2)) * 0.35);
  }
  ribU[x] = profile;
- if (x === W) break;
  // Subtle oil-canning / flat waviness — the V half is folded in per row
- oilU[x] = 0.04 * Math.sin(u * Math.PI * 14);
+ oilU[x] = OIL_CANNING * Math.sin(u * Math.PI * 14);
+ if (x === W) break;
  // Panel end lap / side lap seam darkening
  seamU[x] = u < 0.012 || u > 0.988 ? 0.18 : 0;
  let nearestScrew = Infinity;
@@ -920,8 +942,16 @@ export class SceneView {
  img.data[i + 3] = 255;
 
  // Normal map: derivative of profile in U (ribs run along V).
- // The neighbour sample is the raw rib height, as before — no oil-canning.
- const du = (ribU[x + 1] - profile) * 3.2; // strength
+ //
+ // Both samples must come from the SAME surface. This used to subtract a raw
+ // ribU[x + 1] from a profile that already had the oil-canning term in it, so
+ // the oil amplitude landed as a constant tilt on every pixel of the row
+ // instead of as a derivative. On the flat pan between ribs — where the true
+ // slope is ~0 — that tilted the normal by up to 7.3 degrees, two thirds of
+ // the peak slope of a real rib, waving back and forth down the panel as
+ // oilV swept. Flat metal read as curved.
+ const profileNext = ribU[x + 1] + oilU[x + 1] * oilV;
+ const du = (profileNext - profile) * 3.2; // strength
  // normal in tangent space
  let nx = -du;
  let ny = 0.0;
@@ -2956,7 +2986,16 @@ export class SceneView {
    * Raised roof ribs running eave→ridge (up the slope), spaced along the eave.
    */
  _addRoofSurfaceRibs(group, b, W, L, H, rise, oh, roofHex, style) {
- const ribMat = this._metalMat(new THREE.Color(roofHex).offsetHSL(0, 0, 0.08).getHex(), {
+ // Raised ribs read as a lift off the panel they sit on, so the lift has to
+ // scale with the panel. A flat +0.08 in lightness is invisible on Alamo
+ // White (L 0.27) and more than doubles Matte Black (L 0.059) — which drew
+ // the ribs as white dashes across a black roof.
+ const ribLift = (hex) => {
+ const c = new THREE.Color(hex);
+ const { l } = c.getHSL({ h: 0, s: 0, l: 0 });
+ return c.offsetHSL(0, 0, Math.min(0.08, Math.max(0.012, 0.3 * l))).getHex();
+ };
+ const ribMat = this._metalMat(ribLift(roofHex), {
  // Lite: low metal so raised ribs don't re-wash roof color
  metalness: this.lite ? 0.05 : 0.9,
  roughness: this.lite ? 0.78 : 0.25,
@@ -3420,24 +3459,17 @@ export class SceneView {
  let gableOuterPeakY = null;
  let gableEaveY = null;
  if (isGable) {
- const halfWPre = length / 2 || 1;
- const pitchPre = Number(lt.pitch) || 3;
- const gableRisePre = halfWPre * (pitchPre / 12) * FT;
- const mainOhFtPre =
- ((Number(b.metalOverhangIn) ?? 3) + (Number(b.overhangIn) || 0)) / 12;
- const mainRisePre = roofRise(b) * FT;
- const WftPre = (Number(b.width) || 40) * FT;
- const LftPre = (Number(b.length) || 40) * FT;
- const roofTopPre = mainH + 0.02;
- const onRoofLiftPre = 0.22;
- const ontoRoofPre = Math.max(mainOhFtPre + 3.25, 3.5);
- const halfSpanPre =
- (lt.wall === 'left' || lt.wall === 'right' ? WftPre / 2 : LftPre / 2) +
- mainOhFtPre;
- const mainSlopePre = mainRisePre / Math.max(halfSpanPre, 1);
- gablePeakY = roofTopPre + ontoRoofPre * mainSlopePre + onRoofLiftPre;
- gableOuterPeakY = gablePeakY - 0.06;
- gableEaveY = Math.max(H + 0.02, gableOuterPeakY - gableRisePre);
+ // js/domain/gableLean.js — same 'pinned' numbers as before, just somewhere
+ // scripts/gable-lean-check.mjs can reach without a browser.
+ const g = gableLeanGeometry(b, { ...lt, length }, {
+ rule: 'pinned',
+ mainEaveY: mainH / FT,
+ leanEaveY: H / FT,
+ roofRiseFt: roofRise(b),
+ });
+ gablePeakY = g.peakY * FT;
+ gableOuterPeakY = g.outerPeakY * FT;
+ gableEaveY = g.eaveY * FT;
  }
  // Outer wall / end-rake top: lifted gable eave when gable, else shed hAtOuter
  const outerWallTop =
@@ -4020,9 +4052,48 @@ export class SceneView {
  const eaveY = gableEaveY;
 
  const outerMid = { x: (o1x + o2x) / 2, z: (o1z + o2z) / 2 };
- // High-edge corners of lean at main roof eave tip (// wall) — also ON roof metal
- // Raise corners above lean eave so the attach edge reads as roof-to-roof
- const cornerY = roofTop + onRoofLift * 0.5;
+
+ // A roof plane has to be FLAT. This one is bounded by the wing's eave line
+ // and its ridge line — both running out from the main wall, parallel — so it
+ // is planar exactly when both are level. Lifting the eave corners to the main
+ // roof top while the ridge stayed level dropped one edge 3.1' and the other
+ // 0.06' over the same run and twisted the quad 9.3" out of plane. A twisted
+ // quad is drawn as two triangles and the rib lines bend with it, which is the
+ // curved lean roof metal. Shed leans were always flat and never showed it.
+ const cornerY = eaveY;
+
+ // Which part of the tie-in is valley, which is wall, which clears the main
+ // ridge — solved in js/domain/gableLean.js and covered by
+ // scripts/gable-lean-check.mjs, because getting this from a screenshot has
+ // a poor record. On a 24' wing at 4/12 only ~4' a side is actually valley;
+ // the rest dies into the wall.
+ const mainRiseFt = roofRise(b) * FT;
+ const halfSpanFt =
+ (isSide ? ((Number(b.width) || 40) * FT) / 2 : ((Number(b.length) || 40) * FT) / 2) +
+ mainOhFt;
+ const mainSlope = mainRiseFt / Math.max(halfSpanFt, 1);
+ const tie = gableLeanValley({
+ ridgeY: outerPeakY,
+ eaveY,
+ halfWidth: halfW + sideOh,
+ roofTop,
+ mainSlope,
+ halfSpan: halfSpanFt,
+ });
+ /** (along-wall offset, inward distance) -> plan point. */
+ const tiePt = (sv, dv) => ({
+ x: eaveTipMid.x + axN * sv - outNx * dv,
+ z: eaveTipMid.z + azN * sv - outNz * dv,
+ });
+ // Run the roof plane past that intersection and let the main roof and wall
+ // clip it. The eave line is level, so extending along it changes no height
+ // and the plane stays flat; the overlap is buried inside the building. Only
+ // the ROOF PLANE moves — the rake fascia and eave flash stay keyed to the
+ // eave tip, which is what broke the last attempt at this.
+ const planeIn = Math.max(
+ 0,
+ Math.min(halfSpanFt - 0.5, (tie.valley.length ? tie.ridgeD : 0) + 1.5),
+ );
  const tI1 = {
  x: eaveTipMid.x - axN * (halfW + sideOh),
  z: eaveTipMid.z - azN * (halfW + sideOh),
@@ -4033,6 +4104,10 @@ export class SceneView {
  };
  // Peak on main roof surface (not at wall, not under eave)
  const attachMid = { x: peakOnRoof.x, z: peakOnRoof.z };
+ // Buried copies — roof planes only.
+ const pI1 = tiePt(-(halfW + sideOh), planeIn);
+ const pI2 = tiePt(halfW + sideOh, planeIn);
+ const pAttach = tiePt(0, planeIn);
  // Eave-tip mid used for ridge path outer→tip→peak
  const tipMid = { x: eaveTipMid.x, z: eaveTipMid.z };
 
@@ -4042,8 +4117,8 @@ export class SceneView {
  const leanUvPhase = { worldV0: Math.max(0, Number(lt.offset) || 0) };
  this._addLeanRoofPlane(
  group,
- tI1,
- attachMid,
+ pI1,
+ pAttach,
  rO1,
  outerMid,
  cornerY,
@@ -4057,8 +4132,8 @@ export class SceneView {
  );
  this._addLeanRoofPlane(
  group,
- tI2,
- attachMid,
+ pI2,
+ pAttach,
  rO2,
  outerMid,
  cornerY,
@@ -4090,6 +4165,12 @@ export class SceneView {
  ontoRoof,
  trimHex,
  length,
+ valleyA: tie.valley.length ? tiePt(-tie.sEdge, 0) : null,
+ valleyB: tie.valley.length ? tiePt(tie.sEdge, 0) : null,
+ valleyInA: tie.valley.length ? tiePt(-tie.sRidge, tie.ridgeD) : null,
+ valleyInB: tie.valley.length ? tiePt(tie.sRidge, tie.ridgeD) : null,
+ valleyOutY: roofTop,
+ valleyInY: roofTop + mainSlope * (tie.valley.length ? tie.ridgeD : 0),
  });
 
  // Front (outer) gable-end metal on the WALL plane (outer posts), not the
@@ -4959,7 +5040,7 @@ export class SceneView {
  side: THREE.DoubleSide,
  });
  // Local: X = thickness (outward), Y = vertical drip, Z = along eave
- const fascia = new THREE.Mesh(new THREE.BoxGeometry(T, fasciaH, len * 1.02), mat);
+ const fascia = new THREE.Mesh(new THREE.BoxGeometry(T, fasciaH, len + TRIM_LAP), mat);
  // Proud of outer metal edge so face is visible (not buried in roof)
  const midX = ((ax + bx) / 2) * FT + ox * (T * 0.55);
  const midZ = ((az + bz) / 2) * FT + oz * (T * 0.55);
@@ -5452,7 +5533,7 @@ export class SceneView {
  const midY = (topY + botY) / 2;
 
  // Vertical eave fascia along attach — connects lean high edge to main building
- const face = new THREE.Mesh(new THREE.BoxGeometry(T, faceH, len * 1.01), mat);
+ const face = new THREE.Mesh(new THREE.BoxGeometry(T, faceH, len + TRIM_LAP), mat);
  face.position.set(
  midX + ox * (T * 0.35),
  midY,
@@ -5463,7 +5544,7 @@ export class SceneView {
  group.add(face);
 
  // Small horizontal return under lean roof metal (seals water onto lean panels)
- const ret = new THREE.Mesh(new THREE.BoxGeometry(lap, T * 0.7, len * 1.005), mat);
+ const ret = new THREE.Mesh(new THREE.BoxGeometry(lap, T * 0.7, len + TRIM_LAP), mat);
  ret.position.set(
  midX + ox * (lap * 0.5 + T * 0.2),
  yRoof - T * 0.15,
@@ -5498,6 +5579,12 @@ export class SceneView {
  azN,
  trimHex,
  length,
+ valleyA,
+ valleyB,
+ valleyInA,
+ valleyInB,
+ valleyOutY,
+ valleyInY,
  } = p;
 
  const mat = this._metalMat(trimHex, {
@@ -5571,15 +5658,24 @@ export class SceneView {
  group.add(pad);
  }
 
- // ── Valley flash: lean roof edges that sit on main roof ──
- // From each eave-tip corner up to the peak (on main roof surface)
- for (const [corner, yC] of [
- [tI1, cornerY != null ? cornerY : eaveY],
- [tI2, cornerY != null ? cornerY : eaveY],
- ]) {
- const dx = (attachMid.x - corner.x) * FT;
- const dy = peakY - yC;
- const dz = (attachMid.z - corner.z) * FT;
+ // ── Valley flash: where the wing roof cuts into the main roof ──
+ // Runs the solved intersection (js/domain/gableLean.js), not the roof
+ // plane's own edge — that edge is deliberately buried inside the building
+ // so the main roof can clip it. On a shallow wing there is no valley at
+ // all and this draws nothing, which is correct: it ties into the wall.
+ const runs =
+ valleyA && valleyInA
+ ? [
+ [valleyA, valleyInA],
+ [valleyB, valleyInB],
+ ]
+ : [];
+ for (const [corner, inner] of runs) {
+ const yC = valleyOutY != null ? valleyOutY : eaveY;
+ const yI = valleyInY != null ? valleyInY : peakY;
+ const dx = (inner.x - corner.x) * FT;
+ const dy = yI - yC;
+ const dz = (inner.z - corner.z) * FT;
  const len = Math.hypot(dx, dy, dz);
  if (len < 0.2) continue;
  const valley = new THREE.Mesh(
@@ -5587,9 +5683,9 @@ export class SceneView {
  mat,
  );
  valley.position.set(
- ((corner.x + attachMid.x) / 2) * FT,
- (yC + peakY) / 2 + 0.08,
- ((corner.z + attachMid.z) / 2) * FT,
+ ((corner.x + inner.x) / 2) * FT,
+ (yC + yI) / 2 + 0.08,
+ ((corner.z + inner.z) / 2) * FT,
  );
  const slopeDir = new THREE.Vector3(dx, dy, dz);
  if (slopeDir.lengthSq() > 1e-8) {

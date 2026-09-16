@@ -94,15 +94,36 @@ export function trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof = 0.28 }
   // NOTE: UI labels Scissor / Attic map to the geometries below (swapped once
   // after user feedback so the names match what they expect to see).
   if (type === 'scissor') {
-    // Vaulted / “scissor” look the user expects: rectangular loft under the roof
-    // (room-in-attic style framing). Single-pitch top chords — not gambrel.
+    // Room-in-attic framing: floor, two knee walls, a ceiling collar, and webs
+    // splitting each heel wedge. The bay itself stays a rectangle on purpose —
+    // that is the usable room. Every other opening is already closed into a
+    // triangle by the chords.
     const riseAvail = Math.max(1.25, topRidge - topEave);
     const wantH = Math.min(7.5, Math.max(3.25, riseAvail - 0.85));
-    const tKnee = Math.min(0.92, Math.max(0.2, wantH / riseAvail));
+    let tKnee = Math.min(0.92, Math.max(0.2, wantH / riseAvail));
+    // The knee position trades headroom against width linearly:
+    //   headroom = tKnee * riseAvail      width = span * (1 - tKnee)
+    // Sizing on headroom alone drives the knee walls toward the peak and
+    // leaves a bay nobody can use (5'2" wide on a 30' at 4/12). Widen to a
+    // sensible minimum, but only while the ceiling stays stand-up height.
+    const span = Math.max(right - left, 1e-6);
+    const minRoom = Math.min(14, Math.max(6, span * 0.3));
+    const MIN_HEAD = 3;
+    const tWide = Math.max(0.2, 1 - minRoom / span);
+    if (tWide * riseAvail >= MIN_HEAD) tKnee = Math.min(tKnee, tWide);
+
     const x0 = left + tKnee * (mid - left);
     const x1 = right - tKnee * (right - mid);
     const yFloor = topEave;
     const yCeil = yTop(x0);
+
+    // Some roofs simply cannot carry a room: a 3/12 on a 24' span has 2'9" of
+    // total rise. Rather than draw a box too small to stand or walk in, fall
+    // through to the common layout — and leave atticRoom undefined so nothing
+    // downstream reports a loft that isn't there.
+    const roomW = x1 - x0;
+    const roomH = yCeil - yFloor;
+    if (roomW >= 6 && roomH >= MIN_HEAD) {
 
     const jHeelL = [left + 0.05, yFloor];
     const jHeelR = [right - 0.05, yFloor];
@@ -112,10 +133,12 @@ export function trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof = 0.28 }
     const jCollarR = [x1, yCeil];
     const jPeak = [mid, topRidge];
 
-    const xMidL = lerp(x0, mid, 0.5);
-    const xMidR = lerp(mid, x1, 0.5);
-    const jTopMidL = [xMidL, yTop(xMidL)];
-    const jTopMidR = [xMidR, yTop(xMidR)];
+    // Heel wedges get a vertical and a diagonal back to the knee-wall top.
+    // A member from a heel to a collar corner is NOT drawn: both points lie on
+    // the top chord, so it would be buried inside that chord — costing a beam
+    // per truss and showing nothing.
+    const xWebL = lerp(left, x0, 0.5);
+    const xWebR = lerp(x1, right, 0.5);
 
     return {
       type,
@@ -125,17 +148,15 @@ export function trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof = 0.28 }
         [jKneeL, jCollarL],
         [jKneeR, jCollarR],
         [jCollarL, jCollarR],
-        [jHeelL, jCollarL],
-        [jHeelR, jCollarR],
-        [jCollarL, jPeak],
-        [jCollarR, jPeak],
-        [jCollarL, jTopMidL],
-        [jCollarR, jTopMidR],
-        [jTopMidL, jPeak],
-        [jTopMidR, jPeak],
+        [[mid, yCeil], jPeak],
+        [[xWebL, yFloor], [xWebL, yTop(xWebL)]],
+        [[xWebL, yFloor], jCollarL],
+        [[xWebR, yFloor], [xWebR, yTop(xWebR)]],
+        [[xWebR, yFloor], jCollarR],
       ],
       atticRoom: { x0, x1, yFloor, yCeil },
     };
+    }
   }
 
   if (type === 'attic') {

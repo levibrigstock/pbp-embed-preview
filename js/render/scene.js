@@ -26,7 +26,7 @@ import {
  includeFullFramingExtras,
  gableFlyRafterQty,
 } from '../domain/productionPolicy.js?v=20260910q';
-import { trussMemberLayout } from '../domain/trussTypes.js?v=20260910w';
+import { trussMemberLayout } from '../domain/trussTypes.js?v=20260916b';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
@@ -3419,6 +3419,7 @@ export class SceneView {
  let gablePeakY = null;
  let gableOuterPeakY = null;
  let gableEaveY = null;
+ let gableOntoRoof = null;
  if (isGable) {
  const halfWPre = length / 2 || 1;
  const pitchPre = Number(lt.pitch) || 3;
@@ -3430,14 +3431,30 @@ export class SceneView {
  const LftPre = (Number(b.length) || 40) * FT;
  const roofTopPre = mainH + 0.02;
  const onRoofLiftPre = 0.22;
- const ontoRoofPre = Math.max(mainOhFtPre + 3.25, 3.5);
  const halfSpanPre =
  (lt.wall === 'left' || lt.wall === 'right' ? WftPre / 2 : LftPre / 2) +
  mainOhFtPre;
  const mainSlopePre = mainRisePre / Math.max(halfSpanPre, 1);
- gablePeakY = roofTopPre + ontoRoofPre * mainSlopePre + onRoofLiftPre;
- gableOuterPeakY = gablePeakY - 0.06;
- gableEaveY = Math.max(H + 0.02, gableOuterPeakY - gableRisePre);
+
+ // The wing's ridge height comes from the WING: its own eave plus its own
+ // rise. This used to pin the peak to a fixed point on the main roof and
+ // back-derive the eave from it, which made the rendered pitch and eave
+ // depend on the main building rather than on what was entered. A 24' wing
+ // at 8/12 off a 13' eave drew a 2.4' rise instead of 8'; at 2/12 off a 9'
+ // eave it drew its walls at 13.4'. Only a wing whose numbers happened to
+ // land on the main roof came out right.
+ gableEaveY = H + 0.02;
+ gableOuterPeakY = gableEaveY + gableRisePre;
+ gablePeakY = gableOuterPeakY + 0.06;
+
+ // How far in from the eave tip that ridge actually meets the main roof.
+ // Above the main eave it is a real intersection; at or below it the ridge
+ // dies into the wall, so keep it at the eave line.
+ const aboveRoofPre = gablePeakY - roofTopPre - onRoofLiftPre;
+ gableOntoRoof =
+ aboveRoofPre > 0
+ ? Math.min(aboveRoofPre / Math.max(mainSlopePre, 0.01), halfSpanPre - 0.5)
+ : Math.max(mainOhFtPre, 0.15);
  }
  // Outer wall / end-rake top: lifted gable eave when gable, else shed hAtOuter
  const outerWallTop =
@@ -3997,7 +4014,9 @@ export class SceneView {
  const onRoofLift = 0.22;
  // How far lean peak sits onto main roof (in from eave tip, up the slope)
  // benchmark: peak clearly up on main panels — push further past eave (~3.5′)
- const ontoRoof = Math.max(mainOhFt + 3.25, 3.5);
+ // Derived above from where the wing ridge meets the main roof plane.
+ const ontoRoof =
+ gableOntoRoof != null ? gableOntoRoof : Math.max(mainOhFt + 3.25, 3.5);
  const roofEdgeOut = Math.max(mainOhFt, 0.15);
 
  const wallMid = {
@@ -4022,7 +4041,12 @@ export class SceneView {
  const outerMid = { x: (o1x + o2x) / 2, z: (o1z + o2z) / 2 };
  // High-edge corners of lean at main roof eave tip (// wall) — also ON roof metal
  // Raise corners above lean eave so the attach edge reads as roof-to-roof
- const cornerY = roofTop + onRoofLift * 0.5;
+ // Where the wing's eave meets the main building. When the wing ridge rises
+ // above the main eave, that point is on the roof and the valley climbs from
+ // it. A wing whose ridge stays BELOW the main eave dies into the wall
+ // instead, so its eave stays level at its own height — pinning it to the
+ // roof top stretched a 2' rise into 5'.
+ const cornerY = peakY > roofTop ? roofTop + onRoofLift * 0.5 : eaveY;
  const tI1 = {
  x: eaveTipMid.x - axN * (halfW + sideOh),
  z: eaveTipMid.z - azN * (halfW + sideOh),

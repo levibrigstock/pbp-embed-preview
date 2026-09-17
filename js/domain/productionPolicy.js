@@ -15,6 +15,8 @@
  *     roof 29′11″ / 38′4″
  */
 
+import { ellBuriedRunOnWall } from './ell.js?v=20260917g';
+
 // ── Metal / panel order ─────────────────────────────────────────────
 
 /** Panel coverage width (ft) — standard rib panel. */
@@ -781,7 +783,14 @@ export function ridgeCapPieces(buildingLengthFt, b = null) {
 export function eaveTrimPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   const stock = TRIM_STOCK_FT;
-  let n = Math.max(1, Math.ceil((2 * L) / stock - 1e-9) + trimRunExtraPieces(L, b));
+  // Both eaves, less whatever a wing stands in front of: there is no eave to
+  // trim where another building is butted against it.
+  const buried = ['left', 'right'].reduce(
+    (t, w) => t + Math.min(ellBuriedRunOnWall(b, w), L),
+    0,
+  );
+  const eaveRun = Math.max(0, 2 * L - buried);
+  let n = Math.max(1, Math.ceil(eaveRun / stock - 1e-9) + trimRunExtraPieces(L, b));
   // Plain gable leans (not gable-extension): +1 outer eave return (benchmark 60′+lean → 15)
   if (b) {
     const plainGableLeans = (b.leanTos || []).filter(

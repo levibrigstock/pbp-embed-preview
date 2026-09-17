@@ -194,6 +194,12 @@ export function createOpening(partial = {}) {
  face: partial.face || 'outer',
  /** Walk / garage / slider / window finish: 'WH' | 'BK' */
  color: colorTypes ? finishColor || 'WH' : '',
+ /**
+   * - 'installed' = include door/window/garage unit (default)
+   * - 'framed' = rough opening only (no unit in 3D or takeoff)
+   */
+ installMode:
+  String(partial.installMode || '').toLowerCase() === 'framed' ? 'framed' : 'installed',
  };
 }
 
@@ -444,6 +450,14 @@ export function leanOccupiedSpansOnWall(b, wall) {
       end: start + len,
       pitchMatch: (lt.roofStyle || 'shed') !== 'gable' && leanPitchMatchesMain(b, lt),
     });
+  }
+  // An ell occupies a wall exactly as a lean does: a whole building stands in
+  // front of that stretch, so the eave band, drip and soffit have nothing to
+  // run along there. `_ellSpans` is stamped by resolveEllPlacements — see
+  // domain/ell.js — because the link points from wing to host, not back.
+  for (const es of b?._ellSpans || []) {
+    if (!es || es.wall !== wall || !(es.lengthFt > 0.1)) continue;
+    spans.push({ start: es.start, end: es.end, pitchMatch: false });
   }
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
   const merged = [];

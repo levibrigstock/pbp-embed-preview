@@ -391,10 +391,79 @@ export function resolveEllPlacements(buildings = []) {
     }
   }
 
+  stampEllSpans(list);
+
   return {
     resolved,
     unresolved: list.filter((b) => !done.has(b.id)).map((b) => b.id),
   };
+}
+
+/**
+ * Record on each host which stretches of which walls its wings stand in front
+ * of, as `_ellSpans`.
+ *
+ * A host has no reference to its wings — the link points the other way — and
+ * the two places that need this most, generateGirts and eaveTrimPieces, are
+ * handed a building and nothing else. Threading the whole project through
+ * eight call sites to answer "is there a wing here" is a bigger change than
+ * the question deserves, so the answer is written where those functions
+ * already look: on the building, beside leanTos.
+ *
+ * Derived, never authoritative. It is rewritten from scratch on every call and
+ * cleared on hosts that have no wings, so it cannot outlive the wing that
+ * produced it.
+ *
+ * @param {object[]} buildings mutated in place
+ */
+export function stampEllSpans(buildings = []) {
+  const list = Array.isArray(buildings) ? buildings.filter(Boolean) : [];
+  const spans = new Map();
+  for (const wing of list) {
+    if (!wing.attachedTo) continue;
+    const host = list.find((b) => b.id === wing.attachedTo);
+    if (!host) continue;
+    const pl = ellPlacement(host, wing, {
+      wall: wing.attachWall,
+      offset: wing.attachOffset,
+    });
+    if (!(pl.alongFt > 0.1)) continue;
+    if (!spans.has(host.id)) spans.set(host.id, []);
+    spans.get(host.id).push({
+      wall: pl.wall,
+      start: pl.alongStart,
+      end: pl.alongEnd,
+      lengthFt: pl.alongFt,
+      wingId: wing.id,
+    });
+  }
+  for (const b of list) b._ellSpans = spans.get(b.id) || [];
+  return spans;
+}
+
+/** Total run of this building's wall buried behind wings, in feet. */
+export function ellBuriedRunOnWall(b, wall) {
+  const spans = (b && Array.isArray(b._ellSpans) ? b._ellSpans : []).filter(
+    (s) => s.wall === wall,
+  );
+  if (!spans.length) return 0;
+  // Merge overlaps before summing, or two wings sharing a stretch would
+  // subtract it twice and leave the wall short.
+  const sorted = spans
+    .map((s) => ({ start: s.start, end: s.end }))
+    .sort((a, c) => a.start - c.start);
+  let total = 0;
+  let cur = null;
+  for (const s of sorted) {
+    if (!cur || s.start > cur.end + 1e-9) {
+      if (cur) total += cur.end - cur.start;
+      cur = { ...s };
+    } else {
+      cur.end = Math.max(cur.end, s.end);
+    }
+  }
+  if (cur) total += cur.end - cur.start;
+  return Math.max(0, total);
 }
 
 /**

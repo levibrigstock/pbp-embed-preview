@@ -21,7 +21,7 @@ import {
  isLeanFaceOpen,
  leanOpenFaceList,
  roundFtToNearestInch,
-} from './types.js?v=20260917c';
+} from './types.js?v=20260917i';
 import {
  useFullGirtPackage,
  girtPackMode,
@@ -35,7 +35,8 @@ import {
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260917a';
+} from './productionPolicy.js?v=20260917h';
+import { ellBuriedRunOnWall } from './ell.js?v=20260917g';
 
 /**
  * Place posts on a wall line, including both ends.
@@ -1412,6 +1413,13 @@ export function generateGirts(b) {
   len = Math.max(0, len - leanLen);
   }
   }
+  // A wing butted to this wall makes that stretch interior exactly as a
+  // partial enclosed lean does — girts there are inside the wing, not on an
+  // exterior wall. Unlike a lean, a FULL-length wing still reduces the run:
+  // the Levi exception exists because a lean's outer wall is billed
+  // separately as lean skin, while a wing is a whole building already billing
+  // its own girts.
+  len = Math.max(0, len - Math.min(ellBuriedRunOnWall(b, wall), len));
   if (len > 0.1) {
   runs.push({ wall, lengthFt: len, rows: levels.length, host: 'main' });
   }

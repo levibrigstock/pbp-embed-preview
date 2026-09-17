@@ -6,7 +6,7 @@
 import * as THREE from '../../vendor/three.module.js';
 // Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
 import { OrbitControls } from '../../vendor/OrbitControls.js';
-import { generateFraming } from '../domain/framing.js?v=20260917openjson2';
+import { generateFraming } from '../domain/framing.js?v=20260917h';
 import {
  roofRise,
  wallLength,
@@ -22,7 +22,7 @@ import {
  isWallOpen,
  openWallList,
  isLeanFaceOpen,
-} from '../domain/types.js?v=20260917openjson2';
+} from '../domain/types.js?v=20260917i';
 import {
  wallPanelBelowFloorIn,
  buildingCornerTrimSites,
@@ -30,10 +30,10 @@ import {
  enclosedLeanCoveringCorner,
  includeFullFramingExtras,
  gableFlyRafterQty,
-} from '../domain/productionPolicy.js?v=20260917openjson2';
+} from '../domain/productionPolicy.js?v=20260917h';
 import { trussMemberLayout } from '../domain/trussTypes.js?v=20260917openjson2';
 import { gableLeanGeometry, gableLeanValley } from '../domain/gableLean.js?v=20260916k';
-import { ellGeometry, resolveEllPlacements } from '../domain/ell.js?v=20260917g';
+import { ellGeometry, resolveEllPlacements } from '../domain/ell.js?v=20260917i';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
@@ -1971,6 +1971,36 @@ export class SceneView {
  return solids.filter((p) => p.u1 - p.u0 > 0.04 && p.v1 - p.v0 > 0.04);
  }
 
+
+ /**
+   * Split a wall-length girt into runs that skip opening rectangles
+   * whose height range contains girtY (ft above grade).
+   */
+ _girtRunsAlongWall(wallLen, girtY, openings, gap = 0.04) {
+ let runs = [{ u0: 0, u1: wallLen }];
+ const y = Number(girtY) || 0;
+ for (const o of openings || []) {
+ const ow = Math.max(0.5, Number(o.width) || 3);
+ const oh = Math.max(0.5, Number(o.height) || 7);
+ const sill = Math.max(0, Number(o.sillHeight) || 0);
+ if (y < sill - 0.08 || y > sill + oh + 0.08) continue;
+ const u0 = Math.max(0, (Number(o.offset) || 0) - gap);
+ const u1 = Math.min(wallLen, (Number(o.offset) || 0) + ow + gap);
+ if (u1 <= u0 + 0.02) continue;
+ const next = [];
+ for (const r of runs) {
+ if (u1 <= r.u0 || u0 >= r.u1) {
+ next.push(r);
+ continue;
+ }
+ if (u0 > r.u0 + 0.05) next.push({ u0: r.u0, u1: u0 });
+ if (u1 < r.u1 - 0.05) next.push({ u0: u1, u1: r.u1 });
+ }
+ runs = next;
+ }
+ return runs.filter((r) => r.u1 - r.u0 > 0.08);
+ }
+
  /**
    * Rewrite BoxGeometry UVs so ag-panel ribs lock to absolute wall feet.
    * Openings may split the mesh into pieces, but seams stay on the same 3′ grid
@@ -2420,10 +2450,33 @@ export class SceneView {
  // Never stop at lean start — that leave-off opens a look-into-building
  // pocket under the OH. Same-pitch flush (#61) still meets at the roof
  // plane; wall-face eave band stays omitted on lean pans (#62).
+ //
+ // An ELL is the exception, and only an ell. A lean's roof meets the host
+ // BELOW its eave, so the overhang above stays exposed and the pan has to
+ // run through. A wing's roof runs UP past the host eave to the valley, so
+ // that stretch of overhang is inside the junction: there is no pocket to
+ // open, and a pan there is trim hanging in the wing's ceiling.
  {
- const z0 = -oh;
- const z1 = L + oh;
- const len = z1 - z0;
+ const ellSegs = (b._ellSpans || []).filter(
+ (e) => e && e.wall === wallName && e.lengthFt > 0.1,
+ );
+ const panSegs = [];
+ if (!ellSegs.length) {
+ panSegs.push({ z0: -oh, z1: L + oh });
+ } else {
+ const cut = ellSegs
+ .map((e) => ({ a: e.start, b: e.end }))
+ .sort((p1, p2) => p1.a - p2.a);
+ let cursor = -oh;
+ for (const c of cut) {
+ if (c.a > cursor + 0.05) panSegs.push({ z0: cursor, z1: c.a });
+ cursor = Math.max(cursor, c.b);
+ }
+ if (L + oh > cursor + 0.05) panSegs.push({ z0: cursor, z1: L + oh });
+ }
+ for (const seg of panSegs) {
+ const len = seg.z1 - seg.z0;
+ if (len < 0.12) continue;
  const pan = new THREE.Mesh(
  new THREE.BoxGeometry(panDepth, lipThk, len + T * 0.5),
  mat,
@@ -2431,10 +2484,11 @@ export class SceneView {
  pan.position.set(
  xWall + ox * (out + panDepth * 0.5 - T * 0.25),
  bandTop - lipThk * 0.5,
- (z0 + z1) / 2,
+ (seg.z0 + seg.z1) / 2,
  );
  pan.castShadow = true;
  group.add(pan);
+ }
  }
 
  // Top-of-wall eave band on OUTER face — free spans only (corner leg insets).
@@ -3384,7 +3438,9 @@ export class SceneView {
  g.renderOrder = 20;
  g.userData = { kind: 'opening-root', openingId: o.id };
 
- // Dark opening throat (reads as hole through wall)
+ // Framed out = true see-through RO (no opaque throat). Installed keeps a dark throat behind the unit.
+ const framedOnly = String(o.installMode || '').toLowerCase() === 'framed';
+ if (!framedOnly) {
  const voidMesh = new THREE.Mesh(
  new THREE.BoxGeometry(w * 0.98, h * 0.98, 0.55),
  new THREE.MeshStandardMaterial({
@@ -3397,6 +3453,7 @@ export class SceneView {
  voidMesh.position.z = -0.12;
  voidMesh.renderOrder = 18;
  g.add(voidMesh);
+ }
 
  // Brickmold / exterior casing — overlaps into rough opening so no daylight gaps
  const caseCol = selected ? 0xf59e0b : trimHex;
@@ -3431,7 +3488,8 @@ export class SceneView {
  sillP.position.set(0, -h / 2 - caseT * 0.35, 0.12);
  g.add(sillP);
 
- if (type === 'window') {
+ // Framed out = casing only (no door/window/garage unit mesh).
+ if (!framedOnly && type === 'window') {
  const winCode = String(o.color || '').toUpperCase() === 'BK' ? 'BK' : 'WH';
  const frameCol = selected
  ? 0xc45a20
@@ -3473,7 +3531,7 @@ export class SceneView {
  );
  glint.position.set(-gw * 0.2, gh * 0.15, 0.23);
  g.add(glint);
- } else if (type === 'walk') {
+ } else if (!framedOnly && type === 'walk') {
  const doorCode = String(o.color || '').toUpperCase() === 'BK' ? 'BK' : 'WH';
  const doorCol = selected
  ? 0xc45a20
@@ -3527,7 +3585,7 @@ export class SceneView {
  deadbolt.rotation.x = Math.PI / 2;
  deadbolt.position.set(w * 0.28, 0.22, 0.3);
  g.add(deadbolt);
- } else if (type === 'overhead' || type === 'slider') {
+ } else if (!framedOnly && (type === 'overhead' || type === 'slider')) {
  const doorCode = String(o.color || '').toUpperCase() === 'BK' ? 'BK' : 'WH';
  const doorCol = selected
  ? 0xc45a20
@@ -3561,7 +3619,7 @@ export class SceneView {
  );
  hnd.position.set(0, -h * 0.15, 0.26);
  g.add(hnd);
- } else {
+ } else if (!framedOnly) {
  const fill = new THREE.Mesh(
  new THREE.BoxGeometry(w * 0.9, h * 0.9, 0.1),
  new THREE.MeshStandardMaterial({ color: 0x222226, roughness: 0.6 }),
@@ -5855,9 +5913,10 @@ export class SceneView {
  roughness: 0.72,
  metalness: 0.02,
  });
- // Visual 2x4 only (1.5″ × 3.5″) — takeoff lengths/qty unchanged
- const boardThick = 1.5 / 12;
- const boardFace = 3.5 / 12;
+ // Visual board (~2¼″ × 4″) — clearer than true 1.5×3.5 at building scale;
+ // still a board, not a beam (posts stay ~0.55'). Takeoff lengths/qty unchanged.
+ const boardThick = 3 / 12;
+ const boardFace = 5.5 / 12;
  const underRoof = boardFace / 2 + 0.06; // keep taller board under pans
  const rows = Math.max(3, Math.min(8, Math.ceil(depthFt / 2) + 1));
  for (let r = 1; r < rows; r++) {
@@ -6300,8 +6359,15 @@ export class SceneView {
  const L = b.length * FT;
  const H = b.eaveHeight * FT;
 
- // Inset from all exterior faces so lumber stays behind wall/roof metal
- const insetX = 0.55; // off eave walls
+ // Post-frame seat: eave posts are ~0.55' boxes on the wall line (inner
+ // face at postSize/2). Carrier + truss heels must meet that face — the old
+ // insetX=0.55 left a ~0.175' air gap so trusses looked like they floated
+ // inside, not touching posts / eave / girt line.
+ const postSize = 0.55;
+ const postHalf = postSize / 2;
+ const bearerH = 0.28;
+ const bearerD = 0.26;
+ const insetX = postHalf + bearerD / 2; // bearer flush to post inner face
  const insetZ = 0.65; // off gable ends (no end truss flush with gable metal)
  const underRoof = 0.28; // below roof plane
 
@@ -6331,18 +6397,39 @@ export class SceneView {
  const z1 = L - insetZ;
  const runL = Math.max(1, z1 - z0);
 
- // Eave truss carriers — inside wall line, under eave
- const bearerH = 0.26;
- const bearerD = 0.2;
+ // Eave truss carriers — seated on eave post tops / inner face (not floating)
+ // Top of carrier ≈ post top (H) so heels read as bearing on the wall line.
+ const bearerY = H - bearerH / 2 + 0.04; // top slightly above post top for seat
  for (const x of [xL, xR]) {
  const bearer = new THREE.Mesh(
  new THREE.BoxGeometry(bearerD, bearerH, runL),
  bearerMat,
  );
- bearer.position.set(x, H - 0.05, L / 2);
+ bearer.position.set(x, bearerY, L / 2);
  bearer.castShadow = false;
  bearer.receiveShadow = true;
  group.add(bearer);
+ }
+
+ // Short seat pads on each eave post top → inward under the carrier so the
+ // post/truss joint is obvious in frame view (visual only).
+ const seatMat = bearerMat;
+ const seatH = 0.1;
+ const seatLen = Math.max(0.12, insetX - postHalf + 0.02);
+ for (const p of framing.mainPosts || []) {
+ const onLeft = Math.abs(p.x) < 0.05;
+ const onRight = Math.abs(p.x - b.width) < 0.05;
+ if (!onLeft && !onRight) continue;
+ const toward = onLeft ? 1 : -1;
+ const seat = new THREE.Mesh(
+ new THREE.BoxGeometry(seatLen, seatH, postSize * 0.85),
+ seatMat,
+ );
+ const cx = p.x * FT + toward * (postHalf + seatLen / 2);
+ seat.position.set(cx, H + seatH / 2 - 0.01, p.z * FT);
+ seat.castShadow = false;
+ seat.receiveShadow = true;
+ group.add(seat);
  }
 
  // Trusses — never at exact gable plane; inset along length.
@@ -6367,7 +6454,11 @@ export class SceneView {
  const chordDrop = underRoof + 0.18 / 2 / Math.max(0.2, Math.cos(chordAng));
 
  const ridgeY = H + rise - chordDrop;
- const eaveY = H - 0.04;
+ // Heel / bottom-chord centre sits on the carrier top (nested ~40% of chord
+ // depth) so trusses read as seated on posts — not floating above them.
+ const botChordDepth = 0.16;
+ const bearerTop = bearerY + bearerH / 2;
+ const eaveY = bearerTop - botChordDepth * 0.4;
  const layout =
  (b.roofStyle || 'gable') === 'gable'
  ? trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof })
@@ -6425,7 +6516,7 @@ export class SceneView {
  const yHigh = roofYAt(xL) - chordDrop;
  const yLow = roofYAt(xR) - chordDrop;
  this._woodBeam(group, xL, yHigh, z, xR, yLow, z, trussMat, 0.13, 0.18);
- this._woodBeam(group, xL + 0.05, H - 0.04, z, xR - 0.05, H - 0.04, z, trussMat, 0.11, 0.14);
+ this._woodBeam(group, xL + 0.05, eaveY, z, xR - 0.05, eaveY, z, trussMat, 0.11, 0.14);
  }
  }
 
@@ -6451,9 +6542,9 @@ export class SceneView {
  x = side === 0 ? xL + t * (mid - xL) : xR - t * (xR - mid);
  y = H + t * rise - underRoof;
  }
- // Visual 2x4 only (1.5″ × 3.5″) — takeoff lengths/qty unchanged
- const boardThick = 1.5 / 12;
- const boardFace = 3.5 / 12;
+ // Visual board (~2¼″ × 4″) — clearer at building scale; takeoff unchanged.
+ const boardThick = 3 / 12;
+ const boardFace = 5.5 / 12;
  const purlin = new THREE.Mesh(
  new THREE.BoxGeometry(boardThick, boardFace, purlinLen),
  purlinMat,
@@ -6596,31 +6687,63 @@ export class SceneView {
  // Skin-only open-wall view: posts only
  if (openOnly) return;
 
- // ── Girts (horizontal) — only on closed walls ──
- // Visual 2x4 only (1.5″ thick × 3.5″ face) — takeoff lengths/qty unchanged
- const girtW = 1.5 / 12;
- const girtH = 3.5 / 12;
+ // ── Girts (horizontal) — closed walls only; break at opening ROs ──
+ // Post-frame seat: extend end runs to corner post OUTER faces. Old runs
+ // spanned 0→W/L (post centerline), leaving ~postHalf daylight to the
+ // visible post face; the adjoining wall's girt end-on looked like a thin
+ // floating vertical in that pocket (Levi screenshot, black oval).
+ // Boards ~3″×5½″ so they read as lumber in frame view (screenshot still
+ // showed ribbon-thin sticks at 2¼×4). Still well under post ~6.6″. Takeoff
+ // lengths/qty unchanged. Wall-normal nudge kept for metal pocket.
+ const girtW = 3 / 12;
+ const girtH = 5.5 / 12;
+ const postHalf = postSize / 2;
  const girtWalls = framing.girts?.walls || ['front', 'back', 'left', 'right'];
  const girtSet = new Set(girtWalls);
+ const openingsByWall = { front: [], back: [], left: [], right: [] };
+ for (const o of b.openings || []) {
+ if (o.host && o.host !== 'main') continue;
+ if (isWallOpen(b, o.wall)) continue;
+ if (openingsByWall[o.wall]) openingsByWall[o.wall].push(o);
+ }
+ /** Pad first/last run to corner post outer faces (visual seat only). */
+ const seatRuns = (wallLen, runs) => {
+ if (!runs.length) return [{ u0: -postHalf, u1: wallLen + postHalf }];
+ const out = runs.map((r) => ({ u0: r.u0, u1: r.u1 }));
+ out[0].u0 = Math.min(out[0].u0, -postHalf);
+ out[out.length - 1].u1 = Math.max(out[out.length - 1].u1, wallLen + postHalf);
+ return out;
+ };
  for (const y of framing.girts.levels || []) {
  if (girtSet.has('front') || girtSet.has('back')) {
  for (const z of [0, L]) {
  const wall = z === 0 ? 'front' : 'back';
  if (!girtSet.has(wall)) continue;
- const girt = new THREE.Mesh(new THREE.BoxGeometry(W, girtH, girtW), girtMat);
- girt.position.set(W / 2, y, z);
+ // Nudge inward so the board face isn't buried in exterior metal
+ const zIn = z === 0 ? girtW * 0.55 : L - girtW * 0.55;
+ for (const run of seatRuns(W, this._girtRunsAlongWall(W, y, openingsByWall[wall]))) {
+ const len = run.u1 - run.u0;
+ if (len < 0.08) continue;
+ const girt = new THREE.Mesh(new THREE.BoxGeometry(len, girtH, girtW), girtMat);
+ girt.position.set((run.u0 + run.u1) / 2, y, zIn);
  girt.castShadow = true;
  group.add(girt);
+ }
  }
  }
  if (girtSet.has('left') || girtSet.has('right')) {
  for (const x of [0, W]) {
  const wall = x === 0 ? 'left' : 'right';
  if (!girtSet.has(wall)) continue;
- const girt = new THREE.Mesh(new THREE.BoxGeometry(girtW, girtH, L), girtMat);
- girt.position.set(x, y, L / 2);
+ const xIn = x === 0 ? girtW * 0.55 : W - girtW * 0.55;
+ for (const run of seatRuns(L, this._girtRunsAlongWall(L, y, openingsByWall[wall]))) {
+ const len = run.u1 - run.u0;
+ if (len < 0.08) continue;
+ const girt = new THREE.Mesh(new THREE.BoxGeometry(girtW, girtH, len), girtMat);
+ girt.position.set(xIn, y, (run.u0 + run.u1) / 2);
  girt.castShadow = true;
  group.add(girt);
+ }
  }
  }
  }

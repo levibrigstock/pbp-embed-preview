@@ -40,9 +40,9 @@ import {
   PUBLIC_OPENING_FACE_LABELS,
   PUBLIC_LIMITS,
   PUBLIC_SCHEMA_VERSION,
-} from './publicConfig.js';
+} from './publicConfig.js?v=20260917openjson2';
 
-import { createProject } from '../domain/types.js?v=20260910h';
+import { createProject } from '../domain/types.js?v=20260917openjson2';
 
 const $ = (id) => document.getElementById(id);
 
@@ -152,7 +152,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260917a');    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
+    const { SceneView } = await import('../render/scene.js?v=20260917g');    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,
       onWallClick: (data) => placeOpeningFromViewer(data),

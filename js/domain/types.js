@@ -13,6 +13,9 @@ export const WALL_LABELS = {
  right: 'Right (eave)',
 };
 
+/** Host walls an ell can butt. Mirrors ELL_WALLS in domain/ell.js. */
+export const ELL_ATTACH_WALLS = ['left', 'right', 'front', 'back'];
+
 /** True if wall is a gable end (front/back on rectangular plan). */
 export function isGableWall(wall) {
  return wall === 'front' || wall === 'back';
@@ -417,6 +420,61 @@ export function mainWallHasMatchingPitchShedLean(b, wall) {
   });
 }
 
+/** True when any lean (open or enclosed) attaches to this main wall. */
+export function mainWallHasLean(b, wall) {
+  return (b?.leanTos || []).some(
+    (lt) => lt && lt.wall === wall && (Number(lt.depth) || 0) > 0.1,
+  );
+}
+
+/**
+ * Occupied [start,end) spans (ft along host wall) for leans on `wall`.
+ * Merges overlaps. Used to keep main eave band/drip on free wall length and
+ * only omit the portion that would sit on lean roof metal.
+ */
+export function leanOccupiedSpansOnWall(b, wall) {
+  const spans = [];
+  for (const lt of b?.leanTos || []) {
+    if (!lt || lt.wall !== wall || (Number(lt.depth) || 0) <= 0.1) continue;
+    const start = Math.max(0, Number(lt.offset) || 0);
+    const len = leanToLength(b, lt);
+    if (len <= 0.1) continue;
+    spans.push({
+      start,
+      end: start + len,
+      pitchMatch: (lt.roofStyle || 'shed') !== 'gable' && leanPitchMatchesMain(b, lt),
+    });
+  }
+  spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged = [];
+  for (const s of spans) {
+    const last = merged[merged.length - 1];
+    if (!last || s.start > last.end + 0.05) {
+      merged.push({ ...s });
+    } else {
+      last.end = Math.max(last.end, s.end);
+      last.pitchMatch = !!(last.pitchMatch && s.pitchMatch);
+    }
+  }
+  return merged;
+}
+
+/** Free [start,end) segments of a wall not covered by any lean roof. */
+export function mainWallFreeSegments(b, wall, wallLenFt) {
+  const wl = Math.max(0, Number(wallLenFt) || wallLength(b, wall));
+  const occ = leanOccupiedSpansOnWall(b, wall);
+  const free = [];
+  let cursor = 0;
+  for (const s of occ) {
+    const a = Math.max(0, Math.min(wl, s.start));
+    const e = Math.max(0, Math.min(wl, s.end));
+    if (a > cursor + 0.05) free.push({ start: cursor, end: a });
+    cursor = Math.max(cursor, e);
+  }
+  if (wl > cursor + 0.05) free.push({ start: cursor, end: wl });
+  return free;
+}
+
 /**
  * Visual outer eave height (ft) for shed lean 3D (enclosed walls/trim AND
  * open carport posts / eyebrow). Matches js/render/scene.js _addLeanTo:
@@ -631,10 +689,30 @@ export function createBuilding(partial = {}) {
  : 'fiberglass3',
  hasSlab: partial.hasSlab ?? false,
  slabThicknessIn: partial.slabThicknessIn ?? 4,
- /** Site placement for multi-building layouts (ft). */
+ /**
+     * Site placement for multi-building layouts (ft).
+     * On an ell these are DERIVED from the attachment below and overwritten by
+     * resolveEllPlacements before each rebuild — set attachWall/attachOffset,
+     * not these.
+     */
  siteX: partial.siteX ?? 0,
  siteZ: partial.siteZ ?? 0,
  rotationDeg: partial.rotationDeg ?? 0,
+ /**
+     * Ell attachment: this building is a WING butted to another building,
+     * sharing a roof junction with it. Null for a standalone building, which is
+     * everything that existed before ells.
+     *
+     * A wing is a building in its own right — own posts, trusses, walls — not a
+     * lean-to borrowing the host's structure. That is the whole difference.
+     */
+ attachedTo: partial.attachedTo || null,
+ /** Which host wall the wing butts: left | right (valley) | front | back. */
+ attachWall: ELL_ATTACH_WALLS.includes(partial.attachWall)
+ ? partial.attachWall
+ : 'left',
+ /** Wing's near edge measured along that wall from its origin corner (ft). */
+ attachOffset: Math.max(0, Number(partial.attachOffset) || 0),
  openings: (partial.openings || []).map(createOpening),
  leanTos: (partial.leanTos || []).map((lt) =>
  createLeanTo({

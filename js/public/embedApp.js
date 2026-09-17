@@ -44,7 +44,7 @@ import {
   PUBLIC_SCHEMA_VERSION,
 } from './publicConfig.js?v=20260917p';
 
-import { createProject } from '../domain/types.js?v=20260917i';
+import { createProject } from '../domain/types.js?v=20260917r';
 
 const $ = (id) => document.getElementById(id);
 
@@ -155,7 +155,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260917purlinSeat');    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
+    const { SceneView } = await import('../render/scene.js?v=20260917r');    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,
       onWallClick: (data) => placeOpeningFromViewer(data),

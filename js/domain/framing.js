@@ -21,7 +21,7 @@ import {
  isLeanFaceOpen,
  leanOpenFaceList,
  roundFtToNearestInch,
-} from './types.js?v=20260917i';
+} from './types.js?v=20260917r';
 import {
  useFullGirtPackage,
  girtPackMode,

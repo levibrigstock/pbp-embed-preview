@@ -119,6 +119,30 @@ export function toggleLeanOpenFace(lean, face) {
  return LEAN_FACES.filter((f) => set.has(f));
 }
 
+/**
+ * A cross gable over an entry: a roof feature, not a building and not a
+ * lean-to. See js/domain/crossGable.js for the geometry and why it is neither.
+ */
+export function createCrossGable(partial = {}) {
+  const wall = WALLS.includes(partial.wall) ? partial.wall : 'left';
+  return {
+    id: partial.id || uid('cg'),
+    wall,
+    /** Along the wall, from its origin corner, to the gable's near edge. */
+    offset: Math.max(0, Number(partial.offset) || 0),
+    /** Along the wall. */
+    width: Math.max(2, Number(partial.width) || 10),
+    /** Past the wall. 0 = it sits entirely on the roof. */
+    projection: Math.max(0, Number(partial.projection) || 0),
+    pitch: Math.max(0, Number(partial.pitch) || 0),
+    /** Blank/0 = continue the main eave line. */
+    eaveHeight:
+      partial.eaveHeight == null || partial.eaveHeight === ''
+        ? null
+        : Number(partial.eaveHeight),
+  };
+}
+
 /** 6' 8" walk door height in feet */
 export const WALK_DOOR_HEIGHT = 6 + 8 / 12; // 6.666...
 
@@ -555,6 +579,54 @@ export function openingHostLength(b, opening) {
  return leanToLength(b, lean);
 }
 
+
+/** Round ft for stable Advanced Edit part IDs. */
+export function roundPartFt(ft, places = 2) {
+ const n = Number(ft);
+ if (!Number.isFinite(n)) return 0;
+ const f = 10 ** places;
+ return Math.round(n * f) / f;
+}
+
+/** Stable post part id from plan coordinates (ft). */
+export function postPartId(x, z, scope = 'main') {
+ return `post:${scope}:x${roundPartFt(x)}:z${roundPartFt(z)}`;
+}
+
+/** Stable wall metal panel id from wall-local u/v rect (ft). */
+export function wallPanelPartId(wall, u0, u1, v0, v1) {
+ return `wall-panel:${wall}:u${roundPartFt(u0)}-${roundPartFt(u1)}:v${roundPartFt(v0)}-${roundPartFt(v1)}`;
+}
+
+/** Normalize partOverrides map from saved JSON. */
+export function normalizePartOverrides(raw) {
+ if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+ const out = {};
+ for (const [id, v] of Object.entries(raw)) {
+ if (!id || !v || typeof v !== 'object') continue;
+ const entry = {};
+ if (v.suppressed) entry.suppressed = true;
+ if (v.color) entry.color = String(v.color);
+ if (v.gauge === '26' || v.gauge === 26) entry.gauge = '26';
+ else if (v.gauge === '29' || v.gauge === 29) entry.gauge = '29';
+ if (v.note) entry.note = String(v.note).slice(0, 200);
+ if (v.label) entry.label = String(v.label).slice(0, 120);
+ if (Object.keys(entry).length) out[id] = entry;
+ }
+ return out;
+}
+
+export function partOverride(building, partId) {
+ if (!building || !partId) return null;
+ const map = building.partOverrides;
+ if (!map || typeof map !== 'object') return null;
+ return map[partId] || null;
+}
+
+export function isPartSuppressed(building, partId) {
+ return !!partOverride(building, partId)?.suppressed;
+}
+
 export function createBuilding(partial = {}) {
  return {
  id: partial.id || uid('bldg'),
@@ -727,7 +799,14 @@ export function createBuilding(partial = {}) {
  : 'left',
  /** Wing's near edge measured along that wall from its origin corner (ft). */
  attachOffset: Math.max(0, Number(partial.attachOffset) || 0),
+ /**
+     * Advanced Edit overrides keyed by stable partId
+     * (post:… / wall-panel:…). Values: { suppressed?, color?, gauge?, note? }.
+     */
+ partOverrides: normalizePartOverrides(partial.partOverrides),
  openings: (partial.openings || []).map(createOpening),
+ /** Cross gables over entries — roof features, not buildings or lean-tos. */
+ crossGables: (partial.crossGables || []).map(createCrossGable),
  leanTos: (partial.leanTos || []).map((lt) =>
  createLeanTo({
  ...lt,

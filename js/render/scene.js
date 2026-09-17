@@ -6,7 +6,7 @@
 import * as THREE from '../../vendor/three.module.js';
 // Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
 import { OrbitControls } from '../../vendor/OrbitControls.js';
-import { generateFraming } from '../domain/framing.js?v=20260917h';
+import { generateFraming } from '../domain/framing.js?v=20260917q';
 import {
  roofRise,
  wallLength,
@@ -22,7 +22,11 @@ import {
  isWallOpen,
  openWallList,
  isLeanFaceOpen,
-} from '../domain/types.js?v=20260917i';
+ postPartId,
+ wallPanelPartId,
+ isPartSuppressed,
+ partOverride,
+} from '../domain/types.js?v=20260917r';
 import {
  wallPanelBelowFloorIn,
  buildingCornerTrimSites,
@@ -34,6 +38,7 @@ import {
 import { trussMemberLayout } from '../domain/trussTypes.js?v=20260917openjson2';
 import { gableLeanGeometry, gableLeanValley } from '../domain/gableLean.js?v=20260916k';
 import { ellGeometry, resolveEllPlacements } from '../domain/ell.js?v=20260917i';
+import { crossGableGeometry } from '../domain/crossGable.js?v=20260917q';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
@@ -152,6 +157,10 @@ export class SceneView {
  this.envGroup = new THREE.Group();
  this.scene.add(this.envGroup);
  this.pickables = [];
+ this.partPickables = [];
+ this.selectedPartId = null;
+ this.hoveredPartId = null;
+ this._hoveredPartMesh = null;
  this.openingMeshes = [];
  this._labelSprites = [];
 
@@ -190,7 +199,10 @@ export class SceneView {
  canvas.addEventListener('pointerdown', (e) => this._onPointerDown(e));
  canvas.addEventListener('pointermove', (e) => this._onPointerMove(e));
  canvas.addEventListener('pointerup', (e) => this._onPointerUp(e));
- canvas.addEventListener('pointerleave', (e) => this._onPointerUp(e));
+ canvas.addEventListener('pointerleave', (e) => {
+ this._clearPartHover?.();
+ this._onPointerUp(e);
+ });
  this.resize();
  this._running = true;
  this._loop();
@@ -560,16 +572,17 @@ export class SceneView {
  }
  }
 
- // Trees placed later in rebuild() relative to building footprints
+ // Tree group kept empty (landscape trees disabled in rebuild)
  this._treeGroup = new THREE.Group();
  this._treeGroup.name = 'landscapeTrees';
  this.envGroup.add(this._treeGroup);
  }
 
  /**
-   * Place landscape trees at least clearFt outside every building (and lean-to) footprint.
+   * Landscape trees disabled — cleaner live 3D + summary corner shots.
+   * Clears any leftover tree meshes; does not place new ones.
    */
- _layoutLandscapeTrees(clearFt = 15) {
+ _layoutLandscapeTrees(_clearFt = 15) {
  if (!this._treeGroup) {
  this._treeGroup = new THREE.Group();
  this._treeGroup.name = 'landscapeTrees';
@@ -584,93 +597,6 @@ export class SceneView {
  else obj.material.dispose();
  }
  });
- }
-
- const boxes = this._buildingClearanceBoxes(clearFt);
- // Candidate ring positions around overall site
- let minX = 0;
- let maxX = 40;
- let minZ = 0;
- let maxZ = 40;
- for (const b of this.project?.buildings || []) {
- const sx = b.siteX || 0;
- const sz = b.siteZ || 0;
- minX = Math.min(minX, sx);
- maxX = Math.max(maxX, sx + (b.width || 30));
- minZ = Math.min(minZ, sz);
- maxZ = Math.max(maxZ, sz + (b.length || 40));
- }
- const cx = (minX + maxX) / 2;
- const cz = (minZ + maxZ) / 2;
- const halfW = (maxX - minX) / 2;
- const halfL = (maxZ - minZ) / 2;
- // Place trees on a ring outside the clearance envelope
- const ringR = Math.max(halfW, halfL) + clearFt + 12;
- const candidates = [];
- const n = 12;
- for (let i = 0; i < n; i++) {
- const ang = (i / n) * Math.PI * 2 + 0.35;
- candidates.push([cx + Math.cos(ang) * ringR, cz + Math.sin(ang) * ringR]);
- // second ring farther out, staggered
- const r2 = ringR + 14 + (i % 3) * 4;
- candidates.push([
- cx + Math.cos(ang + 0.2) * r2,
- cz + Math.sin(ang + 0.2) * r2,
- ]);
- }
- // Corner clusters
- for (const [ox, oz] of [
- [-1, -1],
- [1, -1],
- [-1, 1],
- [1, 1],
- ]) {
- candidates.push([
- cx + ox * (halfW + clearFt + 10),
- cz + oz * (halfL + clearFt + 10),
- ]);
- candidates.push([
- cx + ox * (halfW + clearFt + 18),
- cz + oz * (halfL + clearFt + 6),
- ]);
- }
-
- const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3428, roughness: 0.95 });
- const leafMats = [
- new THREE.MeshStandardMaterial({ color: 0x2d5a32, roughness: 0.9 }),
- new THREE.MeshStandardMaterial({ color: 0x3a6e38, roughness: 0.88 }),
- new THREE.MeshStandardMaterial({ color: 0x245028, roughness: 0.92 }),
- ];
-
- let placed = 0;
- for (let i = 0; i < candidates.length && placed < 14; i++) {
- const [x, z] = candidates[i];
- if (!this._pointClearOfBuildings(x, z, boxes)) continue;
-
- const tree = new THREE.Group();
- const h = 7 + (placed % 4) * 1.4;
- const trunk = new THREE.Mesh(
- new THREE.CylinderGeometry(0.22, 0.32, h * 0.35, 8),
- trunkMat,
- );
- trunk.position.y = h * 0.18;
- trunk.castShadow = true;
- tree.add(trunk);
- const leafMat = leafMats[placed % leafMats.length];
- for (let t = 0; t < 3; t++) {
- const cone = new THREE.Mesh(
- new THREE.ConeGeometry(2.2 - t * 0.35, h * 0.38, 10),
- leafMat,
- );
- cone.position.y = h * 0.35 + t * h * 0.18;
- cone.castShadow = true;
- cone.receiveShadow = true;
- tree.add(cone);
- }
- tree.position.set(x, 0, z);
- tree.scale.setScalar(0.85 + (placed % 3) * 0.12);
- this._treeGroup.add(tree);
- placed++;
  }
  }
 
@@ -1268,11 +1194,14 @@ export class SceneView {
  }
  if (this.canvas) {
  this.canvas.style.cursor =
- mode === 'place-opening' || mode === 'place-prop' || mode === 'open-wall'
+ mode === 'place-opening' || mode === 'place-prop' || mode === 'open-wall' || mode === 'edit-part'
  ? 'crosshair'
  : mode === 'move-opening'
  ? 'grab'
  : 'default';
+ }
+ if (mode !== 'edit-part') {
+ this._clearPartHover?.();
  }
  }
 
@@ -1362,6 +1291,7 @@ export class SceneView {
  }
  this.pickables = [];
  this.openingMeshes = [];
+ this.partPickables = [];
  this.propPickables = [];
  this._labelSprites = [];
  if (!this.project) return;
@@ -1385,7 +1315,7 @@ export class SceneView {
  console.error('Failed to add prop', p?.type, err);
  }
  }
- // Trees always ≥15' outside building / lean-to footprints
+ // Landscape trees off (clear leftovers only) — cleaner client + summary shots
  try {
  this._layoutLandscapeTrees(15);
  } catch (err) {
@@ -1781,6 +1711,114 @@ export class SceneView {
  this.renderer.render(this.scene, this.camera);
  }
 
+  return out;
+ }
+
+ /**
+ * Two opposite corner brochure shots for the Summary sheet:
+ *   corner1 — Front gable + Left eave
+ *   corner2 — Back gable + Right eave
+ * Auto-captured into plan summary slots (not a manual Screenshot).
+ *
+ * @param {{ maxWidth?: number, maxHeight?: number }} [opts]
+ * @returns {Promise<{ corner1?: string, corner2?: string }>}
+ */
+ async captureCornerShots(opts = {}) {
+ const out = {};
+ if (!this.webglOk || !this.renderer || !this.camera || !this.controls) {
+ return out;
+ }
+
+ const maxW = Math.max(640, Math.min(opts.maxWidth || 960, 1400));
+ const maxH = Math.max(400, Math.min(opts.maxHeight || 600, 900));
+ const prevCamPos = this.camera.position.clone();
+ const prevTarget = this.controls.target.clone();
+ const prevAuto = !!this.controls.autoRotate;
+ const prevSize = new THREE.Vector2();
+ this.renderer.getSize(prevSize);
+ const prevPr = this.renderer.getPixelRatio();
+ const prevAspect = this.camera.aspect;
+
+ this.controls.autoRotate = false;
+
+ const box = this._buildingElevationBox();
+ let center = new THREE.Vector3(20, 8, 30);
+ let size = new THREE.Vector3(40, 16, 50);
+ if (!box.isEmpty()) {
+ center = box.getCenter(new THREE.Vector3());
+ size = box.getSize(new THREE.Vector3());
+ }
+ // FOV-fit tighter brochure framing (was maxDim*1.28 → camera too far back).
+ // Corner silhouette ≈ both faces on a 45°; modest pad so lean-tos stay in frame.
+ const exportW = maxW;
+ const exportH = maxH;
+ const aspect = exportW / Math.max(exportH, 1);
+ const vFov = THREE.MathUtils.degToRad(this.camera.fov || 38);
+ const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+ const pad = 1.08;
+ const spanHoriz = Math.max((size.x + size.z) / Math.SQRT2, Math.max(size.x, size.z) * 0.9, 12);
+ const spanVert = Math.max(size.y * 1.05, 10);
+ const dH = (spanVert * 0.5) / Math.tan(vFov / 2);
+ const dW = (spanHoriz * 0.5) / Math.tan(hFov / 2);
+ const dist = Math.max(dH, dW, 4) * pad;
+ const eyeY = center.y + size.y * 0.32;
+ this.controls.target.set(center.x, Math.max(center.y * 0.55, size.y * 0.28), center.z);
+ // Equal X/Z so view-ray length in XZ == dist (45° corner).
+ const lateral = dist / Math.SQRT2;
+
+ const corners = [
+ {
+ key: 'corner1',
+ // Front (−Z) gable + Left (−X) eave
+ pos: [center.x - lateral, eyeY, center.z - lateral],
+ },
+ {
+ key: 'corner2',
+ // Back (+Z) gable + Right (+X) eave
+ pos: [center.x + lateral, eyeY, center.z + lateral],
+ },
+ ];
+
+ const hiddenSprites = [];
+ this.root.traverse((obj) => {
+ if (obj?.isSprite && obj.visible) {
+ hiddenSprites.push(obj);
+ obj.visible = false;
+ }
+ });
+
+ try {
+ this.renderer.setPixelRatio(2);
+ this.renderer.setSize(exportW, exportH, false);
+ this.camera.aspect = aspect;
+ this.camera.updateProjectionMatrix();
+
+ for (const corner of corners) {
+ this.camera.position.set(corner.pos[0], corner.pos[1], corner.pos[2]);
+ let dataUrl = this._captureElevationFrame();
+ if (this._isBlankElevationDataUrl(dataUrl)) {
+ await new Promise((r) => requestAnimationFrame(r));
+ this.camera.position.set(corner.pos[0], corner.pos[1], corner.pos[2]);
+ dataUrl = this._captureElevationFrame();
+ }
+ if (dataUrl && dataUrl.startsWith('data:image')) {
+ out[corner.key] = dataUrl;
+ }
+ await new Promise((r) => requestAnimationFrame(r));
+ }
+ } finally {
+ for (const s of hiddenSprites) s.visible = true;
+ this.camera.position.copy(prevCamPos);
+ this.controls.target.copy(prevTarget);
+ this.controls.autoRotate = prevAuto;
+ this.controls.update();
+ this.renderer.setPixelRatio(prevPr);
+ this.renderer.setSize(prevSize.x, prevSize.y, false);
+ this.camera.aspect = prevAspect;
+ this.camera.updateProjectionMatrix();
+ this.renderer.render(this.scene, this.camera);
+ }
+
  return out;
  }
 
@@ -2036,11 +2074,19 @@ export class SceneView {
  uv.needsUpdate = true;
  }
 
- /** Place one wall metal panel in wall-local u/v (ft). */
- _addWallPanel(group, wdef, panel, mat, thick, wallLenFt, buildingId, uvPhase = null) {
+ /** Place one wall metal panel in wall-local u/v (ft). Honors Advanced Edit overrides. */
+ _addWallPanel(group, wdef, panel, mat, thick, wallLenFt, buildingId, uvPhase = null, building = null) {
  const len = panel.u1 - panel.u0;
  let ht = panel.v1 - panel.v0;
  if (len < 0.04 || ht < 0.04) return;
+ const partId = wallPanelPartId(wdef.wall, panel.u0, panel.u1, panel.v0, panel.v1);
+ if (building && isPartSuppressed(building, partId)) return;
+ const ov = building ? partOverride(building, partId) : null;
+ let useMat = mat;
+ if (ov?.color) {
+ useMat = mat.clone();
+ useMat.color = new THREE.Color(this._colorFor(ov.color, 0xc0c4c8));
+ }
  const uMid = (panel.u0 + panel.u1) / 2;
  // Bury bottom panels slightly so no exterior foundation gap shows
  const bury = panel.v0 < 0.15 ? 0.1 : 0;
@@ -2050,10 +2096,10 @@ export class SceneView {
  const vMid = (v0Draw + v1Draw) / 2;
  let mesh;
  if (wdef.axis === 'x') {
- mesh = new THREE.Mesh(new THREE.BoxGeometry(len, ht, thick), mat);
+ mesh = new THREE.Mesh(new THREE.BoxGeometry(len, ht, thick), useMat);
  mesh.position.set(uMid, vMid, wdef.z);
  } else {
- mesh = new THREE.Mesh(new THREE.BoxGeometry(thick, ht, len), mat);
+ mesh = new THREE.Mesh(new THREE.BoxGeometry(thick, ht, len), useMat);
  mesh.position.set(wdef.x, vMid, uMid);
  }
  // Lock rib phase to the full wall — same space as gable-above-eave metal
@@ -2071,15 +2117,27 @@ export class SceneView {
  });
  mesh.castShadow = true;
  mesh.receiveShadow = true;
+ const label = `${(wdef.wall || 'wall').toUpperCase()} wall metal · ${len.toFixed(1)}' × ${ht.toFixed(1)}'`;
  mesh.userData = {
- kind: 'wall',
- host: 'main',
- face: 'main',
+ kind: 'part',
+ partKind: 'wall-panel',
+ partId,
  buildingId,
  wall: wdef.wall,
  wallLength: wallLenFt,
+ host: 'main',
+ face: 'main',
+ label,
+ u0: panel.u0,
+ u1: panel.u1,
+ v0: panel.v0,
+ v1: panel.v1,
  };
+ if (partId === this.selectedPartId) {
+ this._highlightPartMesh(mesh, true);
+ }
  group.add(mesh);
+ this.partPickables.push(mesh);
  }
 
  /** Metal walls + roof (ag panel). Only called when showMetal is true. */
@@ -2194,11 +2252,10 @@ export class SceneView {
  worldV0: 0,
  }),
  );
- this._addWallPanel(group, wdef, panel, wallMat, thick, wallLenFt, b.id, uvPhase);
+ this._addWallPanel(group, wdef, panel, wallMat, thick, wallLenFt, b.id, uvPhase, b);
  }
 
- // Ribs: full wall, skip opening rectangles. Gable front/back ribs are drawn
- // later grade→peak in _addGableEndUpperMetal so the eave joint is one continuous rib.
+ // Ribs: skip openings + suppressed Advanced Edit panels (true cutout).
  if (!isGableEnd) {
  const ribWdef = {
  wall: wdef.wall,
@@ -2208,13 +2265,33 @@ export class SceneView {
  y: wdef.y,
  z: wdef.axis === 'x' ? wdef.z : wdef.span / 2,
  };
- this._addAgRibs(group, ribWdef, wallHex, 3, 0.75, wallOpenings);
+ const suppressedAsOpenings = [];
+ for (const panel of panels) {
+ const pid = wallPanelPartId(wdef.wall, panel.u0, panel.u1, panel.v0, panel.v1);
+ if (!isPartSuppressed(b, pid)) continue;
+ suppressedAsOpenings.push({
+ offset: panel.u0,
+ width: Math.max(0.1, panel.u1 - panel.u0),
+ height: Math.max(0.1, panel.v1 - panel.v0),
+ sillHeight: Math.max(0, panel.v0),
+ });
+ }
+ this._addAgRibs(
+ group,
+ ribWdef,
+ wallHex,
+ 3,
+ 0.75,
+ [...wallOpenings, ...suppressedAsOpenings],
+ );
  }
 
  // Wainscot: only where lower band is solid (intersect panels with 0..wainH)
  if (hasWainscot && wainH > 0.25) {
  const wainTop = wainH / FT;
  for (const panel of panels) {
+ const wainPid = wallPanelPartId(wdef.wall, panel.u0, panel.u1, panel.v0, panel.v1);
+ if (isPartSuppressed(b, wainPid)) continue;
  if (panel.v0 >= wainTop - 0.02) continue;
  const v0 = panel.v0;
  const v1 = Math.min(panel.v1, wainTop);
@@ -2292,6 +2369,192 @@ export class SceneView {
  // Full roof-perimeter trim package (matches production 3D: continuous eave,
  // rake on roof edge, corners to eave, ridge). See _addRoofPerimeterTrim.
  this._addRoofPerimeterTrim(group, b, W, L, H, rise, oh, trimHex, this._ellCut(b));
+
+ // Cross gables sit ON the finished roof, so they go last — their panels and
+ // flashing lap over the main roof rather than being lapped by it.
+ for (const cg of b.crossGables || []) {
+ this._addCrossGable(group, b, cg, W, L, wallHex, roofHex, trimHex);
+ }
+ }
+
+ /**
+   * A cross gable over an entry.
+   *
+   * Drawn ON the main roof rather than cut into it: the main roof stays whole
+   * underneath and this laps over it, which is how it is built and what leaves
+   * the main roof's own panels and ribs untouched.
+   *
+   * Every position comes from crossGableGeometry — the same numbers
+   * check:cross-gable asserts lie on both roof planes — mapped onto the wall's
+   * axes and nowhere re-derived.
+   */
+ _addCrossGable(group, b, cg, W, L, wallHex, roofHex, trimHex) {
+ const g = crossGableGeometry(b, cg);
+ if (!g.supported) return;
+
+ // (t, d, y) → local XYZ. `t` runs along the wall from its origin corner and
+ // `d` is the INWARD distance from the wall, so a negative d is the part that
+ // oversails it.
+ const P = (t, d, y) => {
+ if (g.wall === 'left') return [d, y, t];
+ if (g.wall === 'right') return [W - d, y, t];
+ if (g.wall === 'front') return [t, y, d];
+ return [t, y, L - d];
+ };
+
+ const half = g.widthFt / 2;
+ const c = g.alongCentre;
+ const k = g.kGable;
+ /** Its roof height at a point along the wall. */
+ const yAt = (t) => g.ridgeY - k * Math.abs(t - c);
+ /** How far in the valley reaches there. */
+ const dAt = (t) => (yAt(t) - g.hostEaveY) / Math.max(g.hostSlope, 0.001);
+
+ const runFt = Math.max(1, g.projectionFt + g.ridgeIntoRoofFt);
+ const roofMat = this._agPanelMat(
+ roofHex,
+ runFt,
+ Math.max(1, g.widthFt),
+ this._roofPanelOpts({ side: THREE.DoubleSide }),
+ );
+
+ // Two slopes, each a strip from the outer edge in to the valley. Stepped
+ // along the wall so the panel keeps one UV space across the whole slope.
+ for (const side of [-1, 1]) {
+ const t1 = c + side * half;
+ const steps = Math.max(2, Math.round(half / 0.75));
+ const pos = [];
+ const uv = [];
+ const idx = [];
+ const push = (t, d, y) => {
+ const p = P(t, d, y);
+ pos.push(p[0], p[1], p[2]);
+ uv.push((d + g.projectionFt) / runFt, (t - g.alongStart) / Math.max(1, g.widthFt));
+ return pos.length / 3 - 1;
+ };
+ for (let i = 0; i < steps; i += 1) {
+ const ta = c + ((t1 - c) * i) / steps;
+ const tb = c + ((t1 - c) * (i + 1)) / steps;
+ const ya = yAt(ta);
+ const yb = yAt(tb);
+ const a0 = push(ta, -g.projectionFt, ya);
+ const a1 = push(ta, dAt(ta), ya);
+ const b1 = push(tb, dAt(tb), yb);
+ const b0 = push(tb, -g.projectionFt, yb);
+ // Wind both slopes the same way round the strip; DoubleSide covers the
+ // rest and computeVertexNormals then lights them consistently.
+ if (side < 0) idx.push(a0, a1, b1, a0, b1, b0);
+ else idx.push(a0, b1, a1, a0, b0, b1);
+ }
+ const geo = new THREE.BufferGeometry();
+ geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+ geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
+ geo.setIndex(idx);
+ geo.computeVertexNormals();
+ const mesh = new THREE.Mesh(geo, roofMat);
+ mesh.castShadow = true;
+ mesh.receiveShadow = true;
+ mesh.userData = { kind: 'crossGableRoof', crossGableId: cg.id };
+ group.add(mesh);
+ }
+
+ // The triangle you see from the front, on the outer face.
+ {
+ const d = -g.projectionFt;
+ const a = P(c - half, d, g.eaveY);
+ const peak = P(c, d, g.ridgeY);
+ const bb = P(c + half, d, g.eaveY);
+ const geo = new THREE.BufferGeometry();
+ geo.setAttribute(
+ 'position',
+ new THREE.Float32BufferAttribute([...a, ...peak, ...bb], 3),
+ );
+ geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 0.5, 1, 1, 0], 2));
+ geo.computeVertexNormals();
+ const faceMat = this._agPanelMat(
+ wallHex,
+ Math.max(1, g.widthFt),
+ Math.max(1, g.riseFt),
+ this._wallPanelOpts({ side: THREE.DoubleSide }),
+ );
+ const face = new THREE.Mesh(geo, faceMat);
+ face.castShadow = true;
+ face.userData = { kind: 'crossGableFace', crossGableId: cg.id };
+ group.add(face);
+ }
+
+ this._addCrossGableTrim(group, g, P, yAt, dAt, trimHex);
+
+ // An entry gable that oversails the wall is standing on something. It covers
+ // a porch rather than enclosing a room, so that is posts at the outer
+ // corners, not walls — without them the gable hangs in the air.
+ if (g.projectionFt > 0.25) {
+ const postMat = this._metalMat(trimHex, { metalness: 0.35, roughness: 0.6 });
+ const T = 0.5; // 6x6
+ for (const side of [-1, 1]) {
+ const t = c + side * (half - T / 2);
+ const top = yAt(t);
+ const foot = P(t, -g.projectionFt + T / 2, 0);
+ const post = new THREE.Mesh(new THREE.BoxGeometry(T, top, T), postMat);
+ post.position.set(foot[0], top / 2, foot[2]);
+ post.castShadow = true;
+ post.userData = { kind: 'crossGablePost', crossGableId: cg.id };
+ group.add(post);
+ }
+ }
+ }
+
+ /**
+   * Rake trim down both sides of a cross gable's face, a cap along its ridge,
+   * and valley flashing where it dies into the main roof.
+   */
+ _addCrossGableTrim(group, g, P, yAt, dAt, trimHex) {
+ const mat = this._metalMat(trimHex, {
+ metalness: 0.52,
+ roughness: 0.44,
+ clearcoat: 0.22,
+ side: THREE.DoubleSide,
+ });
+ const half = g.widthFt / 2;
+ const c = g.alongCentre;
+ const bar = (p0, p1, w, h) => {
+ const a = new THREE.Vector3(...p0);
+ const bv = new THREE.Vector3(...p1);
+ const dir = new THREE.Vector3().subVectors(bv, a);
+ const len = dir.length();
+ if (len < 0.2) return;
+ dir.normalize();
+ const right = new THREE.Vector3(0, 1, 0).cross(dir);
+ if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+ right.normalize();
+ const up = new THREE.Vector3().crossVectors(dir, right).normalize();
+ if (up.y < 0) {
+ up.negate();
+ right.negate();
+ }
+ const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, len + TRIM_LAP), mat);
+ m.position.copy(a).addScaledVector(dir, len / 2).addScaledVector(up, 0.04);
+ m.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, dir));
+ m.castShadow = true;
+ group.add(m);
+ };
+
+ const d0 = -g.projectionFt;
+ // Rakes: eave corner up to the peak, on the outer face.
+ bar(P(c - half, d0, g.eaveY), P(c, d0, g.ridgeY), 0.12, 0.34);
+ bar(P(c, d0, g.ridgeY), P(c + half, d0, g.eaveY), 0.12, 0.34);
+ // Ridge: outer peak in to where the ridge meets the main roof.
+ bar(P(c, d0, g.ridgeY + 0.06), P(c, g.ridgeIntoRoofFt, g.ridgeY + 0.06), 0.34, 0.1);
+ // Valleys: the solved line, both sides.
+ for (const side of [-1, 1]) {
+ const tEdge = c + side * half;
+ bar(
+ P(c, g.ridgeIntoRoofFt, g.ridgeY + 0.05),
+ P(tEdge, dAt(tEdge), yAt(tEdge) + 0.05),
+ 0.85,
+ 0.06,
+ );
+ }
  }
 
  /**
@@ -6730,11 +6993,27 @@ export class SceneView {
  let mat = postMat;
  if (p.openingJamb) mat = jambMat;
  else if (p.role === 'gable' || p.role === 'peak') mat = gablePostMat;
+ const partId = postPartId(p.x, p.z, 'main');
+ if (isPartSuppressed(b, partId)) continue;
  const mesh = new THREE.Mesh(new THREE.BoxGeometry(postSize, h, postSize), mat);
  mesh.position.set(p.x * FT, h / 2, p.z * FT);
  mesh.castShadow = true;
- mesh.userData = { kind: 'post', openingJamb: !!p.openingJamb };
+ const label = p.openingJamb
+ ? `Door jamb post @ ${Number(p.x).toFixed(1)}', ${Number(p.z).toFixed(1)}'`
+ : `Post @ ${Number(p.x).toFixed(1)}', ${Number(p.z).toFixed(1)}'`;
+ mesh.userData = {
+ kind: 'part',
+ partKind: 'post',
+ partId,
+ buildingId: b.id,
+ openingJamb: !!p.openingJamb,
+ label,
+ x: p.x,
+ z: p.z,
+ };
+ if (partId === this.selectedPartId) this._highlightPartMesh(mesh, true);
  group.add(mesh);
+ this.partPickables.push(mesh);
  }
 
  // Skin-only open-wall view: posts only
@@ -6886,6 +7165,55 @@ export class SceneView {
  mesh.userData = { kind: 'wall-ground-label', wall: s.wall, code: s.code };
  group.add(mesh);
  }
+ }
+
+
+ _highlightPartMesh(mesh, on, { hover = false } = {}) {
+ if (!mesh?.material) return;
+ const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+ const hex = hover ? 0x38bdf8 : 0xf59e0b;
+ const intensity = hover ? 0.55 : 0.75;
+ for (const m of mats) {
+ if (!m || !m.emissive) continue;
+ if (on) {
+ if (m.userData?._advSavedEmissive == null) {
+ m.userData = m.userData || {};
+ m.userData._advSavedEmissive = m.emissive.getHex();
+ m.userData._advSavedIntensity = m.emissiveIntensity || 0;
+ }
+ m.emissive.setHex(hex);
+ m.emissiveIntensity = intensity;
+ } else if (m.userData && m.userData._advSavedEmissive != null) {
+ m.emissive.setHex(m.userData._advSavedEmissive);
+ m.emissiveIntensity = m.userData._advSavedIntensity || 0;
+ delete m.userData._advSavedEmissive;
+ delete m.userData._advSavedIntensity;
+ }
+ }
+ }
+
+ _clearPartHover() {
+ if (
+ this._hoveredPartMesh &&
+ this._hoveredPartMesh.userData?.partId !== this.selectedPartId
+ ) {
+ this._highlightPartMesh(this._hoveredPartMesh, false);
+ }
+ this._hoveredPartMesh = null;
+ this.hoveredPartId = null;
+ }
+
+ _setPartHover(mesh) {
+ if (!mesh || mesh === this._hoveredPartMesh) return;
+ this._clearPartHover();
+ if (mesh.userData?.partId && mesh.userData.partId === this.selectedPartId) {
+ this.hoveredPartId = mesh.userData.partId;
+ this._hoveredPartMesh = mesh;
+ return;
+ }
+ this._highlightPartMesh(mesh, true, { hover: true });
+ this._hoveredPartMesh = mesh;
+ this.hoveredPartId = mesh.userData?.partId || null;
  }
 
  /** Flat lawn decal — wall name + size cue. */
@@ -7052,6 +7380,30 @@ export class SceneView {
  return;
  }
 
+ if (this.mode === 'edit-part') {
+ const hits = this.raycaster.intersectObjects(this.partPickables, false);
+ if (!hits.length) {
+ if (this.handlers.onPartClick) this.handlers.onPartClick({ miss: true });
+ return;
+ }
+ const mesh = hits[0].object;
+ const ud = mesh.userData || {};
+ if (ud.kind !== 'part' || !ud.partId) return;
+ this.selectedPartId = ud.partId;
+ if (this.handlers.onPartClick) {
+ this.handlers.onPartClick({
+ partId: ud.partId,
+ partKind: ud.partKind,
+ buildingId: ud.buildingId,
+ label: ud.label || ud.partId,
+ wall: ud.wall,
+ openingJamb: !!ud.openingJamb,
+ });
+ }
+ this.rebuild();
+ return;
+ }
+
  if (this.mode === 'place-opening' && this.placeOpeningDraft) {
  const hits = this.raycaster.intersectObjects(this.pickables, false);
  if (!hits.length) return;
@@ -7129,9 +7481,31 @@ export class SceneView {
  }
 
  _onPointerMove(event) {
- if (!this._drag) return;
  this._ndc(event);
  this.raycaster.setFromCamera(this.pointer, this.camera);
+
+ if (this.mode === 'edit-part' && !this._drag) {
+ const hits = this.raycaster.intersectObjects(this.partPickables, false);
+ if (!hits.length) {
+ this._clearPartHover();
+ if (this.handlers.onPartHover) this.handlers.onPartHover({ miss: true });
+ return;
+ }
+ const mesh = hits[0].object;
+ if (mesh?.userData?.kind === 'part') {
+ this._setPartHover(mesh);
+ if (this.handlers.onPartHover) {
+ this.handlers.onPartHover({
+ partId: mesh.userData.partId,
+ partKind: mesh.userData.partKind,
+ label: mesh.userData.label,
+ });
+ }
+ }
+ return;
+ }
+
+ if (!this._drag) return;
  let wallMesh = this._drag.wallMesh;
  const hits = this.raycaster.intersectObjects(this.pickables, false);
  if (hits.length) {

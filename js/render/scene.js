@@ -5913,18 +5913,26 @@ export class SceneView {
  roughness: 0.72,
  metalness: 0.02,
  });
- // Visual board (~2¼″ × 4″) — clearer than true 1.5×3.5 at building scale;
- // still a board, not a beam (posts stay ~0.55'). Takeoff lengths/qty unchanged.
+ // Visual board (~3″ × 5½″) — same as main/#69; takeoff lengths/qty unchanged.
  const boardThick = 3 / 12;
  const boardFace = 5.5 / 12;
  const underRoof = boardFace / 2 + 0.06; // keep taller board under pans
+ // Seat to end-post OUTER faces (package ends are post centerlines).
+ const postHalf = 0.55 / 2;
  const rows = Math.max(3, Math.min(8, Math.ceil(depthFt / 2) + 1));
  for (let r = 1; r < rows; r++) {
  const t = r / rows;
- const ax = i1.x + (o1.x - i1.x) * t;
- const az = i1.z + (o1.z - i1.z) * t;
- const bx = i2.x + (o2.x - i2.x) * t;
- const bz = i2.z + (o2.z - i2.z) * t;
+ let ax = i1.x + (o1.x - i1.x) * t;
+ let az = i1.z + (o1.z - i1.z) * t;
+ let bx = i2.x + (o2.x - i2.x) * t;
+ let bz = i2.z + (o2.z - i2.z) * t;
+ const along = Math.hypot(bx - ax, bz - az) || 1;
+ const ux = (bx - ax) / along;
+ const uz = (bz - az) / along;
+ ax -= ux * postHalf;
+ az -= uz * postHalf;
+ bx += ux * postHalf;
+ bz += uz * postHalf;
  const y = attachH + (outerH - attachH) * t - underRoof;
  const dx = (bx - ax) * FT;
  const dz = (bz - az) * FT;
@@ -6520,14 +6528,20 @@ export class SceneView {
  }
  }
 
- // Purlins — well under roof skin, short of gable ends, inset from eaves
- // t=0 near eave (inset), t=1 near ridge — never at outer metal edge
+ // Purlins — under roof skin, inset from eaves; seat to END TRUSS outer
+ // faces along length (same family as girt seatRuns → post outer faces).
+ // Old purlinLen = runL * 0.98 stopped ~1% of run short of end-truss
+ // centers, leaving aerial daylight to the gable-end frames (Levi after #71).
+ // Top-chord _woodBeam thickness is 0.13 along Z; extend by that so boards
+ // flush-butt the outer faces. Still inside gable metal (insetZ 0.65).
+ // Takeoff lengths/qty unchanged.
  const purlinSp = (b.purlinSpacingIn || 24) / 12;
  const halfRun = W / 2 - insetX;
  const rows =
  framing.purlins?.rowsPerSide || Math.max(3, Math.ceil(halfRun / purlinSp) + 1);
  const sides = (b.roofStyle || 'gable') === 'mono' ? 1 : 2;
- const purlinLen = runL * 0.98;
+ const trussThickZ = 0.13; // matches top-chord thickness in _woodBeam above
+ const purlinLen = runL + trussThickZ;
  for (let side = 0; side < sides; side++) {
  for (let r = 1; r < rows; r++) {
  const t = r / Math.max(1, rows - 1); // 0 eave → 1 ridge; start at r=1
@@ -6542,7 +6556,7 @@ export class SceneView {
  x = side === 0 ? xL + t * (mid - xL) : xR - t * (xR - mid);
  y = H + t * rise - underRoof;
  }
- // Visual board (~2¼″ × 4″) — clearer at building scale; takeoff unchanged.
+ // Visual board (~3″ × 5½″) — #69 readability; takeoff unchanged.
  const boardThick = 3 / 12;
  const boardFace = 5.5 / 12;
  const purlin = new THREE.Mesh(
@@ -6573,6 +6587,12 @@ export class SceneView {
    * Skin-only sales view: skip — these beams sit outside the gable wall and
    * poke through rake fascia/soffit (especially once an enclosed lean turns
    * on the full framing package). Show them in Frame view or with metal off.
+   *
+   * Frame view seat: only protrude by wood overhang (`overhangIn`). The old
+   * Math.max(0.35, frame+metal) stub floated a white skeletal rectangle past
+   * the corner post into empty air when metal was off (default 3″ metal OH,
+   * 0″ wood). Lookouts start on the gable wall plane (no 0.2′ gap) and stop
+   * inside the eave post faces so nothing sticks past the corner.
    */
  _addGableFlyRafters(group, b, mat) {
  if ((b.roofStyle || 'gable') !== 'gable') return;
@@ -6583,11 +6603,14 @@ export class SceneView {
  const H = b.eaveHeight * FT;
  const rise = roofRise(b) * FT;
  const frameOh = (Number(b.overhangIn) || 0) / 12;
- const metalOh = (Number(b.metalOverhangIn) != null ? Number(b.metalOverhangIn) : 3) / 12;
- const oh = Math.max(0.35, (frameOh + metalOh) * FT); // visible stub even at 3″ metal
+ // Wood OH only — metal-only stubs float past the wall in frame/metal-off.
+ const oh = Math.max(0, frameOh * FT);
  const flySp = Math.max(1, Number(b.rafterSpacing) || 5) * FT;
  const flyTotal = Math.max(0, gableFlyRafterQty(b));
- if (flyTotal <= 0 && oh < 0.2) return;
+ // No wood overhang → nothing past the gable wall (end trusses already seat
+ // on the building line). Takeoff still bills fly qty for production.
+ if (oh < 0.08) return;
+ if (flyTotal <= 0) return;
 
  const rafterMat =
  mat ||
@@ -6600,21 +6623,51 @@ export class SceneView {
  // Roof height on gable plane at horizontal x (ft)
  const yAt = (x) => H + rise * (1 - Math.abs(x - W / 2) / Math.max(W / 2, 0.01)) - 0.12;
 
- // Stations across width at rafterSpacing o.c. (ends inclusive) — both gables
+ // Keep lookouts / rake ends inside eave post outer faces (post ~0.55′).
+ const postHalf = 0.55 / 2;
+ const insetX = postHalf + 0.02;
+
+ // Stations across width at rafterSpacing o.c. — inset from eave corners
  const stations = [];
- for (let x = 0; x <= W + 1e-6; x += flySp) stations.push(Math.min(x, W));
- if (stations[stations.length - 1] < W - 0.05) stations.push(W);
+ for (let x = insetX; x <= W - insetX + 1e-6; x += flySp) {
+ stations.push(Math.min(x, W - insetX));
+ }
+ if (!stations.length || stations[0] > insetX + 0.05) stations.unshift(insetX);
+ if (stations[stations.length - 1] < W - insetX - 0.05) stations.push(W - insetX);
 
  for (const [zWall, outSign] of [
  [0, -1],
  [L, 1],
  ]) {
- const zIn = zWall + outSign * 0.2; // just outside gable wall
- const zOut = zWall + outSign * oh; // overhang tip
+ // Start on the gable wall plane (connect to posts) — not 0.2′ out in air
+ const zIn = zWall;
+ const zOut = zWall + outSign * oh; // wood-overhang tip
 
- // End / rake rafter along each slope at the overhang tip
- this._woodBeam(group, 0.15, yAt(0.15), zOut, W / 2, yAt(W / 2), zOut, rafterMat, 0.1, 0.14);
- this._woodBeam(group, W - 0.15, yAt(W - 0.15), zOut, W / 2, yAt(W / 2), zOut, rafterMat, 0.1, 0.14);
+ // End / rake rafter along each slope at the overhang tip (eave-inset)
+ this._woodBeam(
+ group,
+ insetX,
+ yAt(insetX),
+ zOut,
+ W / 2,
+ yAt(W / 2),
+ zOut,
+ rafterMat,
+ 0.1,
+ 0.14,
+ );
+ this._woodBeam(
+ group,
+ W - insetX,
+ yAt(W - insetX),
+ zOut,
+ W / 2,
+ yAt(W / 2),
+ zOut,
+ rafterMat,
+ 0.1,
+ 0.14,
+ );
 
  // Lookout rafters at spacing stations: wall → overhang (each gable end)
  for (const x of stations) {

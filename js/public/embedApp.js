@@ -26,9 +26,11 @@
 import {
   defaultPublicConfig,
   defaultPublicLeanTo,
+  defaultPublicWing,
   defaultPublicOpening,
   validatePublicConfig,
   publicConfigToBuildingPartial,
+  publicConfigToWingPartials,
   sanitizeCompanyId,
   PUBLIC_COLORS,
   PUBLIC_COLOR_CODES,
@@ -40,7 +42,7 @@ import {
   PUBLIC_OPENING_FACE_LABELS,
   PUBLIC_LIMITS,
   PUBLIC_SCHEMA_VERSION,
-} from './publicConfig.js?v=20260917openjson2';
+} from './publicConfig.js?v=20260917p';
 
 import { createProject } from '../domain/types.js?v=20260917i';
 
@@ -81,6 +83,7 @@ async function init() {
     bindColorControls();
     bindMetalAndConcrete();
     bindLeanTos();
+    bindWings();
     bindOpenings();
     bindQuoteDialog();
 
@@ -205,10 +208,18 @@ function applyConfigToViewer(immediate = false) {
   clearTimeout(rebuildTimer);
   const run = () => {
     try {
+      // A wing is a BUILDING butted to the main one, not an entry on its
+      // leanTos, so the project carries more than one. Its position is not set
+      // here — the viewer derives it from the wall and offset before it draws.
+      const main = publicConfigToBuildingPartial(config);
+      // createBuilding honours a provided id, and the wings need one to attach
+      // to. Without this, attachedTo points at undefined and the wing drifts
+      // off to the origin instead of butting the building.
+      main.id = 'embed-main';
       const project = createProject({
         customer: 'Website visitor',
         project: `${config.building.width}x${config.building.length}`,
-        buildings: [publicConfigToBuildingPartial(config)],
+        buildings: [main, ...publicConfigToWingPartials(config, main.id)],
       });
       scene.setProject(project);
       scene.resize?.();
@@ -357,6 +368,117 @@ function renderLeanList() {
 
     host.appendChild(item);
   });
+}
+
+/* ─────────────────────── wings (ells) ─────────────────────── */
+
+function bindWings() {
+  $('addWing')?.addEventListener('click', () => {
+    if (config.wings.length >= PUBLIC_LIMITS.wing.maxCount) return;
+    // Default it onto the LONG wall so it fits, and low enough that its roof
+    // actually meets the main one instead of standing alongside it.
+    const b = config.building;
+    const onEave = b.length >= b.width;
+    config.wings.push(
+      defaultPublicWing({
+        wall: onEave ? 'left' : 'front',
+        width: Math.min(24, Math.max(8, Math.round((onEave ? b.length : b.width) / 2))),
+        eaveHeight: Math.max(8, Math.min(20, b.eaveHeight - 1)),
+        pitch: b.pitch,
+      }),
+    );
+    commit();
+    renderWingList();
+  });
+}
+
+function renderWingList() {
+  const host = $('wingList');
+  if (!host) return;
+  host.innerHTML = '';
+  config.wings.forEach((w, i) => {
+    const item = el('div', 'list-item');
+    item.innerHTML = `
+      <div class="list-head">
+        <strong>Wing ${i + 1}</strong>
+        <button type="button" class="link" data-remove>Remove</button>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Wall</label>
+          ${wallSelect(w.wall, 'wall')}
+        </div>
+        <div class="field">
+          <label>Width (ft, along wall)</label>
+          <input type="number" data-k="width" min="8" max="100" step="1" value="${w.width}" />
+        </div>
+        <div class="field">
+          <label>Projection (ft, out)</label>
+          <input type="number" data-k="length" min="8" max="300" step="1" value="${w.length}" />
+        </div>
+        <div class="field">
+          <label>Offset (ft)</label>
+          <input type="number" data-k="offset" min="0" max="300" step="1" value="${w.offset}" />
+        </div>
+        <div class="field">
+          <label>Eave height (ft)</label>
+          <input type="number" data-k="eaveHeight" min="8" max="20" step="0.5" value="${w.eaveHeight}" />
+        </div>
+        <div class="field">
+          <label>Roof pitch (x/12)</label>
+          <input type="number" data-k="pitch" min="1" max="12" step="0.5" value="${w.pitch}" />
+        </div>
+        <div class="field full inline">
+          <input type="checkbox" data-k="garageDoor" ${w.garageDoor ? 'checked' : ''} id="wing-door-${i}" />
+          <label for="wing-door-${i}" style="font-size:14px;color:var(--text)">Garage door on the end</label>
+        </div>
+        <div class="field">
+          <label>Door width (ft)</label>
+          <input type="number" data-k="garageDoorWidth" min="6" max="24" step="1" value="${w.garageDoorWidth}" />
+        </div>
+        <div class="field">
+          <label>Door height (ft)</label>
+          <input type="number" data-k="garageDoorHeight" min="6" max="16" step="0.5" value="${w.garageDoorHeight}" />
+        </div>
+      </div>
+    `;
+
+    item.querySelector('[data-remove]').addEventListener('click', () => {
+      config.wings.splice(i, 1);
+      commit();
+      renderWingList();
+    });
+
+    item.querySelectorAll('[data-k]').forEach((input) => {
+      input.addEventListener('change', () => {
+        const k = input.dataset.k;
+        if (k === 'garageDoor') w.garageDoor = input.checked;
+        else w[k] = Number(input.value);
+        // Re-shape through the factory so a value the contract will not accept
+        // is corrected in the field the customer is looking at, not silently
+        // later.
+        config.wings[i] = defaultPublicWing(w);
+        commit();
+        renderWingList();
+      });
+    });
+
+    item.querySelector('[data-sel="wall"]').addEventListener('change', (e) => {
+      w.wall = e.target.value;
+      config.wings[i] = defaultPublicWing(w);
+      commit();
+      renderWingList();
+    });
+
+    host.appendChild(item);
+  });
+
+  const add = $('addWing');
+  if (add) {
+    const full = config.wings.length >= PUBLIC_LIMITS.wing.maxCount;
+    add.disabled = full;
+    add.textContent = full ? `Max ${PUBLIC_LIMITS.wing.maxCount} wings` : '+ Add wing';
+  }
 }
 
 /* ─────────────────────── openings ─────────────────────── */
@@ -705,6 +827,26 @@ function formatBuildingSpecs(publicConfig) {
     );
   } else {
     lines.push('Lean-tos: none');
+  }
+  // A wing is a whole section of the building; leaving it out of the specs
+  // would hand the salesperson a quote for the wrong shape.
+  const wings = Array.isArray(publicConfig?.wings) ? publicConfig.wings : [];
+  if (wings.length) {
+    lines.push(
+      'Wings: ' +
+        wings
+          .map(
+            (w) =>
+              `${w.wall} wall, ${w.width}' wide × ${w.length}' out, ${w.eaveHeight}' eave @ ${w.pitch}/12` +
+              (w.offset ? `, ${w.offset}' along` : '') +
+              (w.garageDoor
+                ? ` (garage door ${w.garageDoorWidth}'×${w.garageDoorHeight}')`
+                : ''),
+          )
+          .join('; '),
+    );
+  } else {
+    lines.push('Wings: none');
   }
   const openings = Array.isArray(publicConfig?.openings) ? publicConfig.openings : [];
   if (openings.length) {
@@ -1195,6 +1337,7 @@ function syncFormFromConfig() {
   setVal('concreteThickness', config.concrete.thicknessIn);
 
   renderLeanList();
+  renderWingList();
   renderOpeningList();
 }
 

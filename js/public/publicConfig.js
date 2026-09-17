@@ -111,6 +111,19 @@ export const PUBLIC_LIMITS = {
     eaveHeight: { min: 6, max: 20 },
     maxCount: 8,
   },
+  /**
+   * A wing is a whole building butted to the main one, so its bounds are the
+   * building's, not a lean-to's — it has its own posts and trusses and can be
+   * as tall as the thing it joins.
+   */
+  wing: {
+    width: { min: 8, max: 100 },   // along the host wall
+    length: { min: 8, max: 300 },  // projection out from it
+    offset: { min: 0, max: 300 },
+    pitch: { min: 1, max: 12 },
+    eaveHeight: { min: 8, max: 20 },
+    maxCount: 4,
+  },
   opening: {
     width: { min: 1, max: 24 },
     height: { min: 1, max: 16 },
@@ -146,6 +159,7 @@ export function defaultPublicConfig(companyId = 'demo') {
     },
     metalGauge: '29',
     leanTos: [],
+    wings: [],
     openings: [],
     concrete: {
       enabled: false,
@@ -168,6 +182,31 @@ export function defaultPublicLeanTo(partial = {}) {
       partial.eaveHeight == null || partial.eaveHeight === ''
         ? null
         : clampNum(partial.eaveHeight, PUBLIC_LIMITS.leanTo.eaveHeight, 10),
+  };
+}
+
+/**
+ * A wing (ell): a full-height building butted to the main one, sharing a roof
+ * junction with it. Not a lean-to — it carries its own frame, so it gets its
+ * own width, length, eave and pitch rather than borrowing the host's.
+ *
+ * `width` lies ALONG the host wall and `length` projects out from it, matching
+ * domain/ell.js, where the wing's ridge always ends up perpendicular to the
+ * wall it meets.
+ */
+export function defaultPublicWing(partial = {}) {
+  return {
+    id: partial.id || uid('wing'),
+    wall: pickEnum(partial.wall, PUBLIC_WALLS, 'left'),
+    width: clampNum(partial.width, PUBLIC_LIMITS.wing.width, 24),
+    length: clampNum(partial.length, PUBLIC_LIMITS.wing.length, 30),
+    offset: clampNum(partial.offset, PUBLIC_LIMITS.wing.offset, 0),
+    pitch: clampNum(partial.pitch, PUBLIC_LIMITS.wing.pitch, 6),
+    eaveHeight: clampNum(partial.eaveHeight, PUBLIC_LIMITS.wing.eaveHeight, 10),
+    /** A garage door on the wing's outer gable — the usual reason for a wing. */
+    garageDoor: partial.garageDoor !== false,
+    garageDoorWidth: clampNum(partial.garageDoorWidth, { min: 6, max: 24 }, 16),
+    garageDoorHeight: clampNum(partial.garageDoorHeight, { min: 6, max: 16 }, 8),
   };
 }
 
@@ -254,6 +293,63 @@ export function validatePublicConfig(input) {
   }
   out.leanTos = leans.slice(0, PUBLIC_LIMITS.leanTo.maxCount).map((lt) => defaultPublicLeanTo(isObject(lt) ? lt : {}));
 
+  // ── wings (ells) ──
+  // Clamped against the wall they attach to, because unlike a lean-to a wing
+  // cannot hang off the end: domain/ell.js would silently pull it back and the
+  // customer would see a building somewhere they did not put it.
+  const wings = Array.isArray(src.wings) ? src.wings : [];
+  if (wings.length > PUBLIC_LIMITS.wing.maxCount) {
+    warnings.push(`Too many wings (${wings.length}); kept first ${PUBLIC_LIMITS.wing.maxCount}.`);
+  }
+  out.wings = wings.slice(0, PUBLIC_LIMITS.wing.maxCount).map((w) => {
+    const shaped = defaultPublicWing(isObject(w) ? w : {});
+    const wallLen =
+      shaped.wall === 'front' || shaped.wall === 'back'
+        ? Number(out.building.width) || 0
+        : Number(out.building.length) || 0;
+    if (shaped.width > wallLen) {
+      warnings.push(
+        `wing ${shaped.id}: width ${shaped.width}' is wider than the ${shaped.wall} wall (${wallLen}'); trimmed to fit.`,
+      );
+      shaped.width = Math.max(PUBLIC_LIMITS.wing.width.min, wallLen);
+    }
+    const maxOffset = Math.max(0, wallLen - shaped.width);
+    if (shaped.offset > maxOffset) {
+      warnings.push(
+        `wing ${shaped.id}: offset ${shaped.offset}' would hang off the ${shaped.wall} wall; moved to ${maxOffset}'.`,
+      );
+      shaped.offset = maxOffset;
+    }
+    // A wing whose eave already clears the main RIDGE has no roof junction —
+    // it would just stand alongside. Say so rather than draw it.
+    const mainRidge =
+      (Number(out.building.eaveHeight) || 12) +
+      ((Number(out.building.width) || 0) / 2) * ((Number(out.building.pitch) || 4) / 12);
+    if (shaped.eaveHeight >= mainRidge) {
+      warnings.push(
+        `wing ${shaped.id}: its eave (${shaped.eaveHeight}') is at or above the main ridge (${mainRidge.toFixed(1)}'), so the roofs do not meet.`,
+      );
+    }
+    if (shaped.garageDoor) {
+      // Keep the door under the wing's own eave, same rule as an opening.
+      const maxH = Math.max(1, shaped.eaveHeight - 0.45);
+      if (shaped.garageDoorHeight > maxH) {
+        warnings.push(
+          `wing ${shaped.id}: garage door height clamped ${shaped.garageDoorHeight}' → ${maxH.toFixed(1)}' so it stays under the eave.`,
+        );
+        shaped.garageDoorHeight = Math.round(maxH * 2) / 2;
+      }
+      if (shaped.garageDoorWidth > shaped.width - 2) {
+        const nextW = Math.max(6, shaped.width - 2);
+        warnings.push(
+          `wing ${shaped.id}: garage door width clamped ${shaped.garageDoorWidth}' → ${nextW}' to fit the end wall.`,
+        );
+        shaped.garageDoorWidth = nextW;
+      }
+    }
+    return shaped;
+  });
+
   // ── openings ──
   // Validated AFTER lean-tos so a lean-to host can be checked for existence +
   // enclosure and the face clamped to a real value.
@@ -334,6 +430,9 @@ export function stripSecretsFromConfig(anyConfig) {
           wainscotHeightFt: src.wainscotHeightFt,
         },
         metalGauge: src.wallGauge ?? src.roofGauge,
+        // Wings are separate BUILDINGS, so a single internal building object
+        // cannot see them; they only survive on the public-shaped path below.
+        wings: [],
         leanTos: (src.leanTos || []).map((lt) => ({
           id: lt.id,
           wall: lt.wall,
@@ -444,6 +543,69 @@ export function publicConfigToBuildingPartial(publicConfig) {
       return mapped;
     }),
   };
+}
+
+/**
+ * Convert a validated public config's wings into createBuilding() partials,
+ * each attached to `hostId`.
+ *
+ * The wing is a BUILDING, so it comes back as one — not as an entry on the main
+ * building's leanTos. Its placement is deliberately absent: domain/ell.js
+ * derives siteX / siteZ / rotation from the wall and offset, and setting them
+ * here would be a second source of truth that drifts.
+ *
+ * Colours, gauge and wainscot are inherited from the main building so the two
+ * masses read as one.
+ */
+export function publicConfigToWingPartials(publicConfig, hostId) {
+  const cfg = validatePublicConfig(publicConfig).config;
+  const wainscot =
+    cfg.colors.wainscot && cfg.colors.wainscot !== 'NONE' ? cfg.colors.wainscot : 'NONE';
+
+  return cfg.wings.map((w, i) => ({
+    id: w.id,
+    name: cfg.wings.length > 1 ? `Wing ${i + 1}` : 'Wing',
+    width: w.width,
+    length: w.length,
+    eaveHeight: w.eaveHeight,
+    pitch: w.pitch,
+    roofStyle: 'gable',
+
+    wallColor: cfg.colors.wall,
+    roofColor: cfg.colors.roof,
+    trimColor: cfg.colors.trim,
+    wainscotColor: wainscot,
+    wainscotHeightFt: cfg.colors.wainscotHeightFt,
+    wallGauge: cfg.metalGauge,
+    roofGauge: cfg.metalGauge,
+
+    hasSlab: cfg.concrete.enabled,
+    slabThicknessIn: cfg.concrete.thicknessIn,
+
+    attachedTo: hostId,
+    attachWall: w.wall,
+    attachOffset: w.offset,
+
+    // The wing's outer gable is its own 'front' wall — the end facing away
+    // from the host, which is where a garage door goes.
+    openings: w.garageDoor
+      ? [
+          {
+            id: `${w.id}-door`,
+            type: 'overhead',
+            wall: 'front',
+            width: w.garageDoorWidth,
+            height: w.garageDoorHeight,
+            offset: Math.max(0, (w.width - w.garageDoorWidth) / 2),
+            sillHeight: 0,
+            host: 'main',
+            // Doors only come in white or black in the model; follow the trim
+            // so the door does not read as a white patch on a dark building.
+            color: cfg.colors.trim === 'BK' ? 'BK' : 'WH',
+          },
+        ]
+      : [],
+  }));
 }
 
 /* ──────────────────────────────── helpers ──────────────────────────────── */

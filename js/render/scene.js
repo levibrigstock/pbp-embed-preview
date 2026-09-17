@@ -6,7 +6,7 @@
 import * as THREE from '../../vendor/three.module.js';
 // Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
 import { OrbitControls } from '../../vendor/OrbitControls.js';
-import { generateFraming } from '../domain/framing.js?v=20260910x';
+import { generateFraming } from '../domain/framing.js?v=20260917a';
 import {
  roofRise,
  wallLength,
@@ -14,10 +14,14 @@ import {
  leanToAttachHeight,
  leanToRoofRise,
  leanToOverhangFt,
+ leanVisualOuterEaveFt,
+ leanPitchMatchesMain,
+ mainWallHasMatchingPitchShedLean,
+ isLeanEnclosed,
  isWallOpen,
  openWallList,
  isLeanFaceOpen,
-} from '../domain/types.js?v=20260910h';
+} from '../domain/types.js?v=20260916leanflush';
 import {
  wallPanelBelowFloorIn,
  buildingCornerTrimSites,
@@ -25,7 +29,7 @@ import {
  enclosedLeanCoveringCorner,
  includeFullFramingExtras,
  gableFlyRafterQty,
-} from '../domain/productionPolicy.js?v=20260910q';
+} from '../domain/productionPolicy.js?v=20260917a';
 import { trussMemberLayout } from '../domain/trussTypes.js?v=20260916k';
 import { gableLeanGeometry, gableLeanValley } from '../domain/gableLean.js?v=20260916k';
 import { buildSitePropMesh } from './props.js';
@@ -84,6 +88,14 @@ const OIL_CANNING = 0.04;
  * corner on a 60' lean eave — the overshoot grew with the building.
  */
 const TRIM_LAP = 0.04;
+
+/**
+ * Extra length on the high end of a rake that has to meet its opposite half at
+ * a gable peak. Both ends are cut square to the slope, so the top corners meet
+ * about an inch apart with no lap; this closes that wedge over the wall seam
+ * standing at the apex, and the pair overlap black-on-black above the peak.
+ */
+const GABLE_RAKE_LAP = 0.12;
 
 const COLOR_HEX = {
  BK: 0x0e0e10,
@@ -1793,26 +1805,8 @@ export class SceneView {
 
  // No solid under-building disc (green lawn / AO circle blocked underside truss views)
 
- // Interior slab ONLY when hasSlab — deeply inset so NO exterior concrete shows
- if (b.hasSlab === true) {
- const wallInset = 0.85; // well inside wall line
- const slabW = Math.max(1, W - wallInset * 2);
- const slabL = Math.max(1, L - wallInset * 2);
- const slabThk = Math.max(0.08, ((b.slabThicknessIn || 4) / 12) * FT * 0.7);
- const slab = new THREE.Mesh(
- new THREE.BoxGeometry(slabW, slabThk, slabL),
- new THREE.MeshStandardMaterial({
- color: 0x8e969e,
- roughness: 0.78,
- metalness: 0.02,
- }),
- );
- // Fully below grade so exterior never sees a concrete apron
- slab.position.set(W / 2, -slabThk / 2 - 0.02, L / 2);
- slab.receiveShadow = true;
- slab.castShadow = false;
- group.add(slab);
- }
+ // Concrete pad: order/takeoff only — never draw in 3D (blocks seeing
+ // inside framing while metal is on). hasSlab still drives bury + BOM.
 
  // ── SKIN (metal) vs FRAME toggle ──
  // showMetal = walls + roof + ribs (the "skin")
@@ -1907,17 +1901,23 @@ export class SceneView {
  /**
    * Subtract opening rectangles from the wall so only the door/window
    * footprint is open — metal remains above and below (and beside).
-   * Wall local coords: u along wall (ft), v height from grade (ft).
+   * Wall local coords: u along wall (ft), v up from the mesh bottom (ft).
+   * When the mesh bottom is below grade (bury), pass gradeOffsetFt so sill/RO
+   * (grade-relative) align with opening meshes — otherwise holes sit low and
+   * punch empty slots under window sills.
    * Returns solid panels { u0, u1, v0, v1 }.
    */
- _wallSolidPanels(wallLen, wallH, openings) {
+ _wallSolidPanels(wallLen, wallH, openings, gradeOffsetFt = 0) {
  const gap = 0.02; // tight to casing — larger gaps showed daylight around trim
  let solids = [{ u0: 0, u1: wallLen, v0: 0, v1: wallH }];
+ // When wallH includes below-grade bury (v=0 below floor), shift sill/RO up by
+ // gradeOffsetFt so cutouts line up with opening meshes (sill is grade-relative).
+ const g0 = Math.max(0, Number(gradeOffsetFt) || 0);
 
  const holes = (openings || []).map((o) => {
  const ow = Math.max(0.5, Number(o.width) || 3);
  const oh = Math.max(0.5, Number(o.height) || 7);
- const sill = Math.max(0, Number(o.sillHeight) || 0);
+ const sill = Math.max(0, Number(o.sillHeight) || 0) + g0;
  return {
  u0: Math.max(0, (Number(o.offset) || 0) - gap),
  u1: Math.min(wallLen, (Number(o.offset) || 0) + ow + gap),
@@ -2091,7 +2091,7 @@ export class SceneView {
  (o) => (!o.host || o.host === 'main') && o.wall === wdef.wall,
  );
  const panelsRaw = sheetLowerWall
- ? this._wallSolidPanels(wdef.span, wallHft, wallOpenings)
+ ? this._wallSolidPanels(wdef.span, wallHft, wallOpenings, belowFt)
  : [];
  const panels = panelsRaw.map((p) => ({
  ...p,
@@ -2377,13 +2377,21 @@ export class SceneView {
  const xDrip = side < 0 ? -oh : W + oh;
  const ox = side < 0 ? -1 : 1;
 
- // Drip fascia (outer roof edge)
+ const enclosedLean = mainWallHasEnclosedLean(b, wallName);
+
+ // Drip fascia (outer roof edge) — keep even with enclosed lean so the
+ // main roof edge stays dressed; lean transition flash seals at the wall.
  const face = new THREE.Mesh(new THREE.BoxGeometry(T, fasciaH, dripLen), mat);
  face.position.set(xDrip + ox * (T * 0.35), bandTop - fasciaH * 0.5, L / 2);
  face.castShadow = true;
  group.add(face);
 
- // Soffit pan: from trim outer face out to drip
+ // Soffit pan: from trim outer face out to drip.
+ // Broken-pitch / no matching lean: keep soffit; lean roof nests under it
+ // (roofYIn under-soffit) so the eave pocket seals without z-fight.
+ // Same-pitch shed lean: flush continuous slope replaces the pan — under-nest
+ // would read as a stepped lip at the lean↔main join.
+ if (!mainWallHasMatchingPitchShedLean(b, wallName)) {
  const panDepth = Math.max(oh + out, 0.2);
  const pan = new THREE.Mesh(new THREE.BoxGeometry(panDepth, lipThk, dripLen), mat);
  pan.position.set(
@@ -2393,11 +2401,12 @@ export class SceneView {
  );
  pan.castShadow = true;
  group.add(pan);
+ }
 
  // Top-of-wall eave band on OUTER face (stops at corner legs).
  // Skip on walls with an enclosed lean — that face is under the lean roof;
  // corner trim has moved to the lean outer edge.
- if (!isWallOpen(b, wallName) && !mainWallHasEnclosedLean(b, wallName)) {
+ if (!isWallOpen(b, wallName) && !enclosedLean) {
  const band = new THREE.Mesh(new THREE.BoxGeometry(T, eaveBandH, bandLen), mat);
  band.position.set(outerX(xWall, ox), bandMidY, L / 2);
  band.castShadow = true;
@@ -2490,6 +2499,9 @@ export class SceneView {
  group.add(fascia);
 
  // ── 3) Soffit pan under gable OH (wall outer → drip) ──
+ // Same as side eaves: keep for broken-pitch; skip when matching-pitch shed
+ // lean owns this end (flush continuous lean roof seals the pocket).
+ if (!mainWallHasMatchingPitchShedLean(b, end.wall)) {
  const panDepth = Math.max(oh + out, 0.2);
  const pan = new THREE.Mesh(
  new THREE.BoxGeometry(dripLen * 0.98, lipThk, panDepth),
@@ -2503,6 +2515,7 @@ export class SceneView {
  pan.rotation.z = angSign * dripAng;
  pan.castShadow = true;
  group.add(pan);
+ }
  }
 
  // Peak join — same visual weight as ridge-end on benchmark
@@ -2523,14 +2536,32 @@ export class SceneView {
  const cornerMat = mat.clone();
  cornerMat.side = THREE.DoubleSide;
  for (const c of cornerSites) {
+ // A lean's own outer corner is listed for the takeoff, but drawn by
+ // _addLeanEndCornerTrims, which hangs it off the lean's skin top so the
+ // piece stops under the roof pans instead of piercing them. Drawing it
+ // here as well would put two L-pieces on the same corner.
+ if (c.enclosedCorner === true) continue;
  if (c.walls.every((w) => isWallOpen(b, w))) continue;
  const eaveClosed = !isWallOpen(b, c.walls[1]); // left / right
  const gableClosed = !isWallOpen(b, c.walls[0]); // front / back
  const alongEave = -c.oz;
  const alongGable = -c.ox;
- const siteEaveY = (Number(c.eaveH) || H / FT) * FT;
- const siteBandTop = siteEaveY - nest;
- const siteCornerTop = siteBandTop + 0.04;
+ // Lean-relocated corners: stock eaveH can be the stored outer, but 3D may
+ // drop the lean roof for pitch — cap so the L stops under the lean roof.
+ let eaveHft = Number(c.eaveH) || H / FT;
+ if (c.source === 'lean') {
+ const eaveW = c.walls?.find((w) => w === 'left' || w === 'right');
+ const gableW = c.walls?.find((w) => w === 'front' || w === 'back');
+ const lean = enclosedLeanCoveringCorner(b, { eave: eaveW, gable: gableW });
+ if (lean) eaveHft = Math.min(eaveHft, leanVisualOuterEaveFt(b, lean));
+ }
+ const siteEaveY = eaveHft * FT;
+ // Lean corners need a deeper nest than main eave (0.018) — shallow nest still
+ // z-fights lean pans from above (white/AL L tops read as dashed inset lines).
+ const siteNest = c.source === 'lean' ? 0.09 : nest;
+ const siteBandTop = siteEaveY - siteNest;
+ // Tuck under roof plane (no pierce through lean metal)
+ const siteCornerTop = siteBandTop - 0.02;
  const siteCornerH = Math.max(0.5, siteCornerTop - cornerBot);
  const siteMidY = cornerBot + siteCornerH * 0.5;
  const cx = c.x * FT;
@@ -3125,10 +3156,12 @@ export class SceneView {
  g.add(sillP);
 
  if (type === 'window') {
- const winCode = o.color === 'BK' ? 'BK' : 'WH';
+ const winCode = String(o.color || '').toUpperCase() === 'BK' ? 'BK' : 'WH';
  const frameCol = selected
  ? 0xc45a20
- : this._colorFor(winCode, winCode === 'WH' ? 0xf5f5f2 : 0x2c2c30);
+ : winCode === 'BK'
+ ? 0x111114
+ : this._colorFor('WH', 0xf5f5f2);
  const vinyl = new THREE.MeshStandardMaterial({
  color: frameCol,
  roughness: 0.4,
@@ -3165,14 +3198,17 @@ export class SceneView {
  glint.position.set(-gw * 0.2, gh * 0.15, 0.23);
  g.add(glint);
  } else if (type === 'walk') {
- const doorCode = o.color === 'BK' ? 'BK' : 'WH';
+ const doorCode = String(o.color || '').toUpperCase() === 'BK' ? 'BK' : 'WH';
  const doorCol = selected
  ? 0xc45a20
- : this._colorFor(doorCode, doorCode === 'WH' ? 0xf5f5f2 : 0x2c2c30);
+ : doorCode === 'BK'
+ ? 0x111114
+ : this._colorFor('WH', 0xf5f5f2);
  const doorSkin = new THREE.MeshStandardMaterial({
  color: doorCol,
- metalness: 0.45,
- roughness: 0.4,
+ metalness: doorCode === 'BK' ? 0 : 0.45,
+ roughness: doorCode === 'BK' ? 0.92 : 0.4,
+ envMapIntensity: doorCode === 'BK' ? 0 : 1,
  });
  const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.985, h * 0.985, 0.12), doorSkin);
  door.position.z = 0.15;
@@ -3216,14 +3252,17 @@ export class SceneView {
  deadbolt.position.set(w * 0.28, 0.22, 0.3);
  g.add(deadbolt);
  } else if (type === 'overhead' || type === 'slider') {
- const doorCode = o.color === 'BK' ? 'BK' : 'WH';
+ const doorCode = String(o.color || '').toUpperCase() === 'BK' ? 'BK' : 'WH';
  const doorCol = selected
  ? 0xc45a20
- : this._colorFor(doorCode, doorCode === 'WH' ? 0xf5f5f2 : 0x2c2c30);
+ : doorCode === 'BK'
+ ? 0x111114
+ : this._colorFor('WH', 0xf5f5f2);
  const doorMat = new THREE.MeshStandardMaterial({
  color: doorCol,
- roughness: 0.42,
- metalness: 0.4,
+ roughness: doorCode === 'BK' ? 0.92 : 0.42,
+ metalness: doorCode === 'BK' ? 0 : 0.4,
+ envMapIntensity: doorCode === 'BK' ? 0 : 1,
  });
  const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.985, h * 0.985, 0.14), doorMat);
  door.position.z = 0.14;
@@ -3256,7 +3295,7 @@ export class SceneView {
  }
 
  {
- const doorTone = o.color === 'BK' ? ' BK' : ' WH';
+ const doorTone = String(o.color || '').toUpperCase() === 'BK' ? ' BK' : ' WH';
  const sizeTxt =
  type === 'walk'
  ? `WALK ${formatOpeningLabel(o.width, o.height)}${doorTone}`
@@ -3384,7 +3423,7 @@ export class SceneView {
 
  const isSide = lt.wall === 'left' || lt.wall === 'right';
  const isGable = (lt.roofStyle || 'shed') === 'gable';
- const enclosed = lt.enclosed !== false && this.showMetal !== false;
+ const enclosed = isLeanEnclosed(lt) && this.showMetal !== false;
  const ridgeRise = isGable ? (length / 2) * ((lt.pitch || 3) / 12) * FT : 0;
  // Match engineering attach height (under main eave when lean is lower)
  const attachFt = isGable
@@ -3393,9 +3432,12 @@ export class SceneView {
  const attachH = attachFt * FT;
  const sideWallH = isGable ? H + ridgeRise : Math.max(H, attachH);
 
- // Slight overlap INTO the main wall so lean roof/ends seal to main metal
- // (negative = toward building). Tiny inset still avoids z-fight sparkle.
- const inLap = 0.06; // ft into main wall face
+ // Overlap INTO the main wall so lean roof/ends seal through wall metal.
+ // Framing package inners sit on the building line; wall metal is 0.16′
+ // centered ~0.05′ inside the line (outer ≈ −0.03′, inner ≈ +0.13′).
+ // Lap past the inner face so the high edge cannot read short of the wall
+ // from the lean (daylight slit). Flash sits on the OUTER trim plane.
+ const inLap = 0.18; // ft into main wall face
  const nudge = (p) => {
  if (lt.wall === 'left') return { x: p.x + inLap, z: p.z };
  if (lt.wall === 'right') return { x: p.x - inLap, z: p.z };
@@ -3437,7 +3479,8 @@ export class SceneView {
 
  // Roof / end-wall heights — shed: high at main wall, low at outer eave.
  // NEVER lift the attach edge above the main building eave (that floats the
- // lean roof above the structure). If outer ≈ main, drop the outer instead.
+ // lean roof above the structure). If outer ≈ main, drop the outer instead
+ // (same-pitch continuous uses mainE − designRise so flush attach is not fought).
  const designRiseFt = Math.max(
  leanToRoofRise(lt),
  depth * ((Number(lt.pitch) || Number(b.pitch) || 4) / 12),
@@ -3448,7 +3491,7 @@ export class SceneView {
  ? Math.max(H, attachH)
  : Math.min(mainH, leanToAttachHeight(b, lt) * FT);
  if (!isGable && hAtMain < hAtOuter + 0.45 * FT) {
- // Prefer attach under/at main eave; drop outer for pitch
+ // Prefer attach at main eave; drop outer for pitch (continuous when matched)
  hAtMain = mainH;
  hAtOuter = Math.max(8 * FT, hAtMain - designRiseFt * FT);
  }
@@ -3474,11 +3517,15 @@ export class SceneView {
  // Outer wall / end-rake top: lifted gable eave when gable, else shed hAtOuter
  const outerWallTop =
  isGable && gableEaveY != null ? gableEaveY : hAtOuter;
+ // Nest skins / open eyebrow / posts under lean roof underside. Wall tops,
+ // eave band, corner L, or eyebrow at outerWallTop pierce black pans from
+ // above as a white/light dashed inset — not ag-panel ribs. Enclosed wall
+ // packaging stays behind `enclosed`; open sheds still nest posts+eyebrow.
+ const leanUnderRoof = 0.09;
+ const outerSkinTop = Math.max(0.5 * FT, outerWallTop - leanUnderRoof);
 
- // Concrete under lean footprint (optional, independent of main hasSlab)
- if (lt.hasSlab === true) {
- this._addLeanSlab(group, pkg, lt, b);
- }
+ // Lean concrete: takeoff only — skip 3D mesh (same as main pad).
+ // if (lt.hasSlab === true) this._addLeanSlab(group, pkg, lt, b);
 
  // Structure visibility (benchmark sales look):
  // - Frame / metal-off: posts + purlins + outer bearer
@@ -3488,13 +3535,18 @@ export class SceneView {
  const showLeanPosts = frameOnly || !enclosed;
  const showLeanPurlins = frameOnly;
  if (showLeanPosts) {
- this._addLeanPosts(group, pkg, b, lt);
+ // 3D post tops follow visual outer eave (may drop for pitch) + nest under
+ // pans — takeoff still uses lean.eaveHeight / package heightAboveGrade.
+ this._addLeanPosts(group, pkg, b, lt, {
+ visualOuterFt: outerWallTop / FT,
+ nestFt: leanUnderRoof / FT,
+ });
  if (frameOnly) {
  // Outer: 2-ply rafter bearer (2x10); attach: 2-ply ledger (2x8)
  this._addLeanOuterBearer(group, outerStart, outerEnd, outerWallTop, isSide);
  this._addLeanAttachLedger(group, innerStart, innerEnd, hAtMain, lt.wall);
  // Shed corner cross-braces (outer → main) — always in frame view
- if (!isGable && lt.enclosed !== false) {
+ if (!isGable && isLeanEnclosed(lt)) {
  this._addLeanCornerBraces(
  group,
  lt,
@@ -3586,7 +3638,7 @@ export class SceneView {
  if (!outerOpen) {
  const oux = (outerEnd.x - outerStart.x) / Math.max(length, 0.01);
  const ouz = (outerEnd.z - outerStart.z) / Math.max(length, 0.01);
- const wallHft = outerWallTop / FT;
+ const wallHft = outerSkinTop / FT;
  const wainTopFt = wainH > 0.25 ? wainH / FT : 0;
 
  // Outer wall metal — same recipe as main:
@@ -3659,7 +3711,7 @@ export class SceneView {
  group,
  outerStart,
  outerEnd,
- outerWallTop,
+ outerSkinTop,
  lt.wall,
  wallHex,
  outerOpens,
@@ -3681,11 +3733,23 @@ export class SceneView {
  );
  }
 
- // Top-of-wall eave BANDING on the lean outer face (trim color) — matches the
- // dark horizontal band in sales reference photos. Always drawn for enclosed
- // leans; drip fascia at the overhang tip is separate (added with the roof).
- this._addLeanOuterWallEaveBand(group, oa, ob, outerWallTop, outNx, outNz, trimHex);
+ // No top-of-wall band on the lean outer face. It ran a horizontal trim line
+ // straight across the eave on the front of an enclosed lean, which is not on
+ // the building — the drip fascia at the overhang tip is the only trim that
+ // belongs at that line, and it is added with the roof.
  }
+ // Outer corner L-pieces at lean ends not already covered by relocated main
+ // corners (partial lean mid-wall ends). Uses outerSkinTop so trim stops
+ // under the lean roof (no pierce through pans).
+ this._addLeanEndCornerTrims(
+ group,
+ b,
+ lt,
+ outerStart,
+ outerEnd,
+ outerSkinTop,
+ trimHex,
+ );
 
  // ── END walls — same ag panel as main (rake trap + continuous UV + ribs) ──
  for (const [face, aInRaw, aOutRaw] of [
@@ -3742,10 +3806,15 @@ export class SceneView {
 
  // Shed end-triangle metal: when off, sheet end walls only to outer eave
  // (rectangle); when on, full rake under the roof (includes brace triangles).
- const wantEndTri =
- isGable || lt.endTriangleMetal !== false;
- const endInnerH = wantEndTri ? hAtMain : outerWallTop;
- const endOuterH = outerWallTop;
+ // A rake belongs to a SHED lean, whose roof climbs from the outer eave up to
+ // the main wall — its end walls really are triangles. A GABLE wing's eave is
+ // level the whole way out, so its end walls are rectangles at that eave.
+ // Raking them to the MAIN eave left a wedge of wall standing above the wing's
+ // roof on both ends: the pale triangle above the trim line. Gable wings also
+ // forced this on regardless of the per-lean toggle.
+ const wantEndTri = !isGable && lt.endTriangleMetal !== false;
+ const endInnerH = (wantEndTri ? hAtMain : outerWallTop) - leanUnderRoof;
+ const endOuterH = outerSkinTop;
 
  // Full rake (or rectangle) wall in wall color
  this._addLeanEndWallRake(
@@ -3768,6 +3837,11 @@ export class SceneView {
  wallHex,
  enx,
  enz,
+ // A rectangle is the INTENDED shape here, so skip the guard that treats
+ // equal end heights as bad data and forces a rake. Without this, capping
+ // the wall to the wing eave made it 6'8" TALLER instead of flat — which is
+ // why the triangle survived being "removed".
+ !wantEndTri,
  );
 
  // Proud wainscot band + trim (same visual language as main)
@@ -3831,9 +3905,9 @@ export class SceneView {
  side: THREE.DoubleSide,
  });
  const faces = [
- ['outer', outerStart, outerEnd, length, H],
- ['leftEnd', innerStart, outerStart, depth, sideWallH],
- ['rightEnd', innerEnd, outerEnd, depth, sideWallH],
+ ['outer', outerStart, outerEnd, length, outerWallTop],
+ ['leftEnd', innerStart, outerStart, depth, Math.max(sideWallH, hAtMain)],
+ ['rightEnd', innerEnd, outerEnd, depth, Math.max(sideWallH, hAtMain)],
  ];
  for (const [face, a, c, wallLen, ht] of faces) {
  const sx = ((a.x + c.x) / 2) * FT;
@@ -3888,8 +3962,8 @@ export class SceneView {
  group,
  nudge(aInRaw),
  { x: aOutRaw.x, z: aOutRaw.z },
- hAtMain,
- outerWallTop,
+ hAtMain - leanUnderRoof,
+ outerSkinTop,
  null,
  {
  kind: 'wall',
@@ -3902,7 +3976,7 @@ export class SceneView {
  openWall: true,
  endTriangle: true,
  },
- outerWallTop,
+ outerSkinTop,
  openWallHex,
  enx,
  enz,
@@ -3911,12 +3985,13 @@ export class SceneView {
  }
  }
 
- // Outer eave eyebrow over the 2-ply rafter bearer.
+ // Outer eave eyebrow over the 2-ply rafter bearer — nest under pans so
+ // cream wall metal does not z-fight through open-shed roof (white dashes).
  this._addLeanEyebrow(
  group,
  o1,
  o2,
- outerWallTop,
+ outerSkinTop,
  this._bearerDepthFt(lt.rafterBearerSize),
  openWallHex,
  oxu,
@@ -3954,10 +4029,16 @@ export class SceneView {
  const eaveA = { x: o1x, z: o1z };
  const eaveB = { x: o2x, z: o2z };
 
- // Roof heights — shed attach sits just under main eave (connected, not floating)
+ // Roof heights — shed attach:
+ //   same pitch as main → flush with main eave plane (one continuous slope;
+ //     no under-soffit step / lip at the lean↔main join).
+ //   broken pitch → nest under main soffit pan so the eave pocket seals.
+ const pitchMatch = !isGable && leanPitchMatchesMain(b, lt);
  const roofYIn = isGable
  ? Math.max(mainH, H) + 0.02
- : Math.min(mainH - 0.02, hAtMain + 0.02);
+ : pitchMatch
+ ? Math.min(mainH, hAtMain) + 0.02
+ : Math.min(mainH - 0.08, hAtMain - 0.04);
  const slopeOut =
  depth > 0.05 ? ((hAtOuter - hAtMain) / depth) * FT : 0;
  const roofYOutTip = hAtOuter + slopeOut * ohFt + 0.02;
@@ -3991,7 +4072,9 @@ export class SceneView {
  const alongLen = Math.hypot(o2x - o1x, o2z - o1z) || 1;
  const axN = (o2x - o1x) / alongLen;
  const azN = (o2z - o1z) / alongLen;
- this._addLeanTransitionFlash(group, i1, i2, roofYIn, isSide, trimHex, {
+ // Building-line attach (not roof inLap) so flash can sit on the
+ // outer trim plane — same plane as the main eave band it replaces.
+ this._addLeanTransitionFlash(group, innerStart, innerEnd, roofYIn, isSide, trimHex, {
  mainEaveY: mainH,
  wall: lt.wall,
  });
@@ -4205,15 +4288,19 @@ export class SceneView {
  this._addLeanRakeFasciaEdge(group, rO1, outerMid, eaveY, outerPeakY, trimHex, {
  endNx: outNx,
  endNz: outNz,
+ lapHighFt: GABLE_RAKE_LAP,
  });
  this._addLeanRakeFasciaEdge(group, outerMid, rO2, outerPeakY, eaveY, trimHex, {
  endNx: outNx,
  endNz: outNz,
+ lapHighFt: GABLE_RAKE_LAP,
  });
- this._addLeanOuterEaveFascia(group, rO1, rO2, eaveY, trimHex, {
- outNx,
- outNz,
- });
+ // No eave fascia across the outer face. On a gable wing that face is a
+ // GABLE END, not an eave — its trim is the two rake runs above, climbing to
+ // the peak and back down. Running a drip straight across the bottom of them
+ // put a horizontal bar over the front of the wing at eave height, which is
+ // not on the building. (A shed lean's outer edge really is an eave and still
+ // gets its fascia; that call lives in the shed branch.)
  }
 }
 
@@ -4260,9 +4347,10 @@ export class SceneView {
  }),
  );
  // Keep lean roof DoubleSide + polygonOffset to avoid z-fight with main eave
+ // and residual wall-top / trim edges under the pans.
  roofM.polygonOffset = true;
- roofM.polygonOffsetFactor = -1;
- roofM.polygonOffsetUnits = -1;
+ roofM.polygonOffsetFactor = -2;
+ roofM.polygonOffsetUnits = -2;
 
  const geo = new THREE.BufferGeometry();
  geo.setAttribute(
@@ -4292,6 +4380,8 @@ export class SceneView {
  const mesh = new THREE.Mesh(geo, roofM);
  mesh.castShadow = true;
  mesh.receiveShadow = true;
+ // Draw after wall tops / trim so lean pans win residual depth ties
+ mesh.renderOrder = 3;
  group.add(mesh);
 
  // Raised ribs up the slope (attach → outer), spaced along the lean eave
@@ -4900,9 +4990,10 @@ export class SceneView {
  const oz = (Number(outer.z) || 0) * FT;
  const y0 = Math.max(0, Number(yBottom) || 0);
 
- // Nudge tops slightly into the roof plane (roof sits at h + 0.015)
- let hi = Math.max(0.5, Number(hMain) || 14) + 0.05;
- let ho = Math.max(0.5, Number(hOuter) || 10) + 0.05;
+ // Use caller heights as absolute tops (enclosed path nests under roof).
+ // Prior +0.05 "into roof plane" pierced black lean pans (white dashed inset).
+ let hi = Math.max(0.5, Number(hMain) || 14);
+ let ho = Math.max(0.5, Number(hOuter) || 10);
  const run = Math.hypot(ox - ix, oz - iz) || 1;
  if (!allowThinOuter && Math.abs(hi - ho) < 0.4) {
  // Degenerate data would draw a rectangle under a pitched roof — force rake
@@ -5085,6 +5176,13 @@ export class SceneView {
 
  const T = 0.12;
  const fasciaH = 0.34;
+ // A rake runs 1% short by default so it cannot overshoot the corner it dies
+ // into. Two rakes that have to MEET each other (the halves of a gable end)
+ // ask for lapHighFt: the ends are cut square to the slope, so without a lap
+ // their top corners stop an inch apart and the wall seam behind shows
+ // through the wedge. The extra goes on the HIGH end only, leaving the eave
+ // corner at the other end of the run exactly where it was.
+ const lapHigh = Math.max(0, Number(opts.lapHighFt) || 0);
  const mat = this._metalMat(trimHex, {
  metalness: 0.52,
  roughness: 0.44,
@@ -5092,10 +5190,14 @@ export class SceneView {
  side: THREE.DoubleSide,
  });
  // Long axis along roof edge (slope). Drip hangs down; face points end-outward.
- const fascia = new THREE.Mesh(new THREE.BoxGeometry(T, fasciaH, len * 0.99), mat);
- const midX = ((ax + bx) / 2) * FT + ex * (T * 0.55);
- const midZ = ((az + bz) / 2) * FT + ez * (T * 0.55);
- const midY = (yIn + yOut) / 2 - fasciaH * 0.35;
+ const fascia = new THREE.Mesh(
+ new THREE.BoxGeometry(T, fasciaH, len * 0.99 + lapHigh),
+ mat,
+ );
+ const hs = ((dy >= 0 ? 1 : -1) * (lapHigh / 2)) / len;
+ const midX = ((ax + bx) / 2) * FT + ex * (T * 0.55) + dx * hs;
+ const midZ = ((az + bz) / 2) * FT + ez * (T * 0.55) + dz * hs;
+ const midY = (yIn + yOut) / 2 - fasciaH * 0.35 + dy * hs;
  fascia.position.set(midX, midY, midZ);
 
  // Basis: localZ = along slope edge, localX = end-outward (horizontal), localY = up-ish
@@ -5140,45 +5242,91 @@ export class SceneView {
  }
 
  /**
-   * Dark trim band on the OUTER face of an enclosed lean wall, just under the
-   * roof line — same visual language as the main eave wall-face band.
-   * Reference: lean sidewall photos with continuous trim banding under the eave.
+   * Vertical corner L (or strip) at enclosed lean OUTER ends when that end is
+   * not a main-building corner already relocated by buildingCornerTrimSites.
+   * Height = visual lean outer eave (under roof) — never main eave through roof.
    */
- _addLeanOuterWallEaveBand(group, a, b, wallTopY, outNx, outNz, trimHex) {
- const ax = Number(a.x) || 0;
- const az = Number(a.z) || 0;
- const bx = Number(b.x) || 0;
- const bz = Number(b.z) || 0;
- const dx = (bx - ax) * FT;
- const dz = (bz - az) * FT;
- const len = Math.hypot(dx, dz);
- if (len < 0.12) return;
- let ox = Number(outNx) || 0;
- let oz = Number(outNz) || 0;
- const oLen = Math.hypot(ox, oz) || 1;
- ox /= oLen;
- oz /= oLen;
- // Match main eave band proportions (_addRoofPerimeterTrim)
- const T = 0.12;
- const eaveBandH = 0.36;
- const nest = 0.018;
+ _addLeanEndCornerTrims(group, b, lt, outerStart, outerEnd, outerWallTop, trimHex) {
+ const W = Number(b.width) || 0;
+ const L = Number(b.length) || 0;
+ const wall = lt.wall || 'left';
+ const depth = Number(lt.depth) || 0;
+ if (depth < 0.1) return;
+ const start = Math.max(0, Number(lt.offset) || 0);
+ const span =
+ Number(lt.length) > 0
+ ? Math.min(Number(lt.length), Math.max(0, (wall === 'front' || wall === 'back' ? W : L) - start))
+ : Math.max(0, (wall === 'front' || wall === 'back' ? W : L) - start);
+ const end = start + span;
+ // Ends that already sit on a main corner are drawn in _addRoofPerimeterTrim
+ const onMainCorner = (along) => along <= 0.25 || along >= (wall === 'front' || wall === 'back' ? W : L) - 0.25;
+ const ends = [];
+ if (wall === 'left' || wall === 'right') {
+ if (!onMainCorner(start)) {
+ ends.push({
+ x: wall === 'left' ? -depth : W + depth,
+ z: start,
+ ox: wall === 'left' ? -1 : 1,
+ oz: -1,
+ });
+ }
+ if (!onMainCorner(end)) {
+ ends.push({
+ x: wall === 'left' ? -depth : W + depth,
+ z: end,
+ ox: wall === 'left' ? -1 : 1,
+ oz: 1,
+ });
+ }
+ } else {
+ if (!onMainCorner(start)) {
+ ends.push({
+ x: start,
+ z: wall === 'front' ? -depth : L + depth,
+ ox: -1,
+ oz: wall === 'front' ? -1 : 1,
+ });
+ }
+ if (!onMainCorner(end)) {
+ ends.push({
+ x: end,
+ z: wall === 'front' ? -depth : L + depth,
+ ox: 1,
+ oz: wall === 'front' ? -1 : 1,
+ });
+ }
+ }
+ if (!ends.length) return;
+
  const out = 0.14;
- const bandTop = wallTopY - nest;
- const bandMidY = bandTop - eaveBandH * 0.5;
+ const T = 0.13;
+ const leg = 0.45;
+ // Caller typically passes outerSkinTop (already under roof); tiny extra nest
+ // clears remaining z-fight with lean pans / ribs.
+ const nest = 0.02;
+ const cornerBot = -0.08;
+ const eaveY = Number(outerWallTop) || leanVisualOuterEaveFt(b, lt) * FT;
+ const bandTop = eaveY - nest;
+ const cornerTop = bandTop - 0.02; // under roof, no pierce
+ const cornerH = Math.max(0.5, cornerTop - cornerBot);
  const mat = this._metalMat(trimHex, {
- metalness: 0.55,
- roughness: 0.4,
- clearcoat: 0.25,
+ metalness: 0.52,
+ roughness: 0.44,
+ clearcoat: 0.22,
  side: THREE.DoubleSide,
  });
- // Local: X = thickness (outward), Y = vertical band, Z = along wall
- const band = new THREE.Mesh(new THREE.BoxGeometry(T, eaveBandH, len * 0.995), mat);
- const midX = ((ax + bx) / 2) * FT + ox * (out - T * 0.5);
- const midZ = ((az + bz) / 2) * FT + oz * (out - T * 0.5);
- band.position.set(midX, bandMidY, midZ);
- band.rotation.y = Math.atan2(dx, dz);
- band.castShadow = true;
- group.add(band);
+ for (const c of ends) {
+ const alongEave = -c.oz;
+ const alongGable = -c.ox;
+ const cx = c.x * FT;
+ const cz = c.z * FT;
+ const lGeo = this._cornerLGeometry(leg, T, cornerH);
+ const mesh = new THREE.Mesh(lGeo, mat);
+ mesh.position.set(cx + c.ox * out, cornerBot, cz + c.oz * out);
+ mesh.scale.set(alongGable, 1, alongEave);
+ mesh.castShadow = true;
+ group.add(mesh);
+ }
  }
 
  /** Diagonal rake fascia along end-wall top (under roof rake). */
@@ -5188,7 +5336,7 @@ export class SceneView {
 
  /**
    * Concrete slab under lean-to footprint (inset slightly from posts).
-   * Visible in 3D when lt.hasSlab is true.
+   * Kept for optional debug; not called — pad is takeoff-only in 3D.
    */
  _addLeanSlab(group, pkg, lt, b) {
  const i1 = pkg.innerStart;
@@ -5262,7 +5410,7 @@ export class SceneView {
  }
 
  /** Lean-to posts from framing package (open lean / frame view). */
- _addLeanPosts(group, pkg, b, lt) {
+ _addLeanPosts(group, pkg, b, lt, opts = {}) {
  const postMat = new THREE.MeshStandardMaterial({
  color: 0xc4a06a,
  roughness: 0.72,
@@ -5279,15 +5427,21 @@ export class SceneView {
  // outer mid-line posts come from package; corners guaranteed
  ].filter(Boolean);
 
- // Gable lean (benchmark): peak sits ON main roof; outer posts track lean side eave
- let defaultH = Number(lt.eaveHeight) || 10;
- if ((lt.roofStyle || 'shed') === 'gable') {
+ const isGableLean = (lt.roofStyle || 'shed') === 'gable';
+ const nestFt = Math.max(0, Number(opts.nestFt) || 0.09);
+ // Visual outer eave (3D) — may drop below stored lean.eaveHeight when pitch
+ // needs room under main attach. Takeoff / package heights stay unchanged.
+ let defaultH =
+ opts.visualOuterFt != null && Number.isFinite(Number(opts.visualOuterFt))
+ ? Number(opts.visualOuterFt)
+ : leanVisualOuterEaveFt(b, lt);
+ if (isGableLean) {
  const leanLen = Number(pkg.length) || Number(lt.length) || 12;
  const halfW = leanLen / 2 || 1;
  const rise = halfW * ((Number(lt.pitch) || 3) / 12);
  // Peak ~1.4' above main eave (further onto roof slope); outer eave = peak - rise
  const peakApprox = (Number(b.eaveHeight) || 12) + 1.4;
- defaultH = Math.max(defaultH, peakApprox - rise);
+ defaultH = Math.max(Number(lt.eaveHeight) || 10, peakApprox - rise);
  }
 
  const seen = new Set();
@@ -5295,7 +5449,13 @@ export class SceneView {
  const key = `${x.toFixed(2)},${z.toFixed(2)}`;
  if (seen.has(key)) return;
  seen.add(key);
- const h = Math.max(0.5, (hFt != null ? hFt : defaultH) * FT);
+ let topFt = hFt != null ? Number(hFt) : defaultH;
+ if (!Number.isFinite(topFt)) topFt = defaultH;
+ // Shed: never taller than visual outer roof plane (stops pierce through pans)
+ if (!isGableLean) topFt = Math.min(topFt, defaultH);
+ // Nest under metal underside (open + enclosed frame view)
+ topFt = Math.max(0.5, topFt - nestFt);
+ const h = topFt * FT;
  const mesh = new THREE.Mesh(new THREE.BoxGeometry(postSize, h, postSize), postMat);
  mesh.position.set(x * FT, h / 2, z * FT);
  mesh.castShadow = true;
@@ -5500,10 +5660,11 @@ export class SceneView {
  const len = Math.hypot(dx, dz);
  if (len < 0.1) return;
 
- const upturn = (Number(opts.upturnIn) || 3.5) / 12;
- const drop = (Number(opts.dropIn) || 4.0) / 12;
- const lap = (Number(opts.lapIn) || 2.5) / 12;
- const T = 0.1; // fascia thickness (ft) — same language as main eave fascia
+ // Tall enough to bridge lean roof (under soffit) up to main eave band
+ const upturn = (Number(opts.upturnIn) || 5.0) / 12;
+ const drop = (Number(opts.dropIn) || 4.5) / 12;
+ const lap = (Number(opts.lapIn) || 4.0) / 12;
+ const T = 0.12; // fascia thickness (ft) — match main eave band weight
 
  const wall = opts.wall || (_isSideWall ? 'left' : 'front');
  let ox = 0;
@@ -5522,8 +5683,16 @@ export class SceneView {
  // Yaw keeps local Z along attach (// main wall / main eave) and local Y world-up
  // → vertical drip face (rotated correctly as eave trim, not flat on roof)
  const yaw = Math.atan2(dx, dz);
+ // Callers pass building-line attach points (framing package inners).
  const midX = ((ax + bx) / 2) * FT;
  const midZ = ((az + bz) / 2) * FT;
+
+ // Same outer plane as main eave band / corner trim (`out` in
+ // _addRoofPerimeterTrim). Keying off roof inLap (into the wall) used to
+ // bury this face inside the 0.16′ wall metal — invisible from the lean,
+ // so the attach read as a daylight gap under the main eave.
+ const out = 0.14;
+ const faceCenter = out - T * 0.5; // outer face of strip at `out`
 
  // Top of this fascia meets underside of main eave fascia when possible
  const mainEaveY = opts.mainEaveY != null ? opts.mainEaveY : yRoof + upturn;
@@ -5532,23 +5701,23 @@ export class SceneView {
  const faceH = Math.max(0.28, topY - botY);
  const midY = (topY + botY) / 2;
 
- // Vertical eave fascia along attach — connects lean high edge to main building
+ // Vertical eave fascia on OUTER wall plane — connects lean high edge to main eave
  const face = new THREE.Mesh(new THREE.BoxGeometry(T, faceH, len + TRIM_LAP), mat);
  face.position.set(
- midX + ox * (T * 0.35),
+ midX + ox * faceCenter,
  midY,
- midZ + oz * (T * 0.35),
+ midZ + oz * faceCenter,
  );
  face.rotation.y = yaw;
  face.castShadow = true;
  group.add(face);
 
- // Small horizontal return under lean roof metal (seals water onto lean panels)
+ // Small horizontal return under lean roof metal (outside the wall, into the lean)
  const ret = new THREE.Mesh(new THREE.BoxGeometry(lap, T * 0.7, len + TRIM_LAP), mat);
  ret.position.set(
- midX + ox * (lap * 0.5 + T * 0.2),
+ midX + ox * (out + lap * 0.5),
  yRoof - T * 0.15,
- midZ + oz * (lap * 0.5 + T * 0.2),
+ midZ + oz * (out + lap * 0.5),
  );
  ret.rotation.y = yaw;
  ret.castShadow = false;
@@ -6368,11 +6537,30 @@ export class SceneView {
  if (this.mode === 'place-opening' && this.placeOpeningDraft) {
  const hits = this.raycaster.intersectObjects(this.pickables, false);
  if (!hits.length) return;
- const hit = hits[0];
- const ud = hit.object.userData;
- if (ud.kind !== 'wall') return;
- // Block placing openings on open drive-through walls (main or lean)
- if (ud.openWall) return;
+ // Prefer a closed wall. Open lean outer pick planes sit in front of end
+ // walls / the bay and used to swallow the click with a silent return.
+ let hit = null;
+ let ud = null;
+ for (const h of hits) {
+ const d = h.object?.userData;
+ if (!d || d.kind !== 'wall') continue;
+ if (d.openWall) continue;
+ hit = h;
+ ud = d;
+ break;
+ }
+ // No closed wall on the ray — still deliver lean/main open-face hits so
+ // the UI can auto-close a lean face or show a drive-through hint.
+ if (!ud) {
+ for (const h of hits) {
+ const d = h.object?.userData;
+ if (!d || d.kind !== 'wall') continue;
+ hit = h;
+ ud = d;
+ break;
+ }
+ }
+ if (!hit || !ud) return;
  const draft = this.placeOpeningDraft;
  const offset = this._offsetOnWall(hit.object, hit.point, draft.width);
  if (this.handlers.onWallClick) {
@@ -6384,8 +6572,10 @@ export class SceneView {
  width: draft.width,
  height: draft.height,
  sillHeight: draft.sillHeight ?? 0,
+ color: draft.color || '',
  host: ud.host || 'main',
  face: ud.face || 'main',
+ openWall: !!ud.openWall,
  });
  }
  return;

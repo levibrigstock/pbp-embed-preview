@@ -29,12 +29,13 @@ import {
  purlinStationPad,
  purlinRowsPerSide,
  panelMetalOverhangIn,
+ roofPanelOrderAddInches,
  useMidGable18Demotion,
  isExplicitMidGableKeep20,
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260910h';
+} from './productionPolicy.js?v=20260917a';
 
 /**
  * Place posts on a wall line, including both ends.
@@ -1167,26 +1168,37 @@ export function computeLeanToMaterials(b, lean, dims) {
  // isGableExt declared with purlin stations above
  const roofAlong = isGableExt ? depth : length;
  const roofPanelQty = Math.ceil(roofAlong / coverage) * roofSides + (isGable ? 0 : 0);
- // Order cut: metal drip OH (not wood frame OH) + short add, nearest inch.
- // Mark 16'@2/12+3" → 16'7"; Prater 10'@2/12+3" → 10'6" (even if frame OH is 1').
- // Gable-extension: include wood frame OH so Jim 33' wing @ 5/12+2' → ~20'5".
+ // Order cut: metal drip OH + short add, nearest inch.
+ // Mark/Prater (square-eave main, overhangIn 0): metal only → 16'7" / 10'6".
+ // Wood-frame OH mains (Pulver 12″+3″): inherit main frame OH on shed lean so
+ // 8'×4/12 → 9'11" (SmartBuild), not depth-only 8'7".
+ // Gable-extension: always include wood frame OH (Jim wing ~20'5").
  const metalInRaw = lean.metalOverhangIn != null ? Number(lean.metalOverhangIn) : 3;
  const metalOhOrderFt =
  (Number.isFinite(metalInRaw) && metalInRaw > 0 ? metalInRaw : 3) / 12;
+ const mainFrameIn = Number(b.overhangIn) || 0;
+ const leanFrameIn = Number(lean.overhangIn) || 0;
  const frameOhOrderFt = isGableExt
- ? (Number(lean.overhangIn) || Number(b.overhangIn) || 0) / 12
+ ? (leanFrameIn || mainFrameIn) / 12
+ : mainFrameIn >= 6
+ ? mainFrameIn / 12
  : 0;
  const leanPitchRatio = (Number(lean.pitch) || 3) / 12;
  const halfSpan = isGable
  ? (isGableExt ? length / 2 : depth / 2) + metalOhOrderFt + frameOhOrderFt
- : depth + metalOhOrderFt;
+ : depth + metalOhOrderFt + frameOhOrderFt;
  // Gable-extension: rise on full half-span incl. OH (Jim → 20'5"). Plain gable
  // lean keeps rise on building half-depth only (Mark/Prater locks).
  const riseRun = isGable
  ? (isGableExt ? halfSpan : depth / 2) * leanPitchRatio
  : depth * leanPitchRatio;
  const leanOrderSlope = Math.hypot(halfSpan, riseRun);
- const leanAddIn = leanOrderSlope < 20 ? 1.5 : 2;
+ // Same order-add policy as main roof (wood OH → 3″ drip; else short/mid).
+ const leanAddIn = roofPanelOrderAddInches(leanOrderSlope, {
+ overhangIn: mainFrameIn >= 6 ? mainFrameIn : 0,
+ metalOverhangIn:
+ Number.isFinite(metalInRaw) && metalInRaw > 0 ? metalInRaw : 3,
+ });
  const roofPanelLen = Math.round((leanOrderSlope + leanAddIn / 12) * 12) / 12;
 
  // --- Wall metal (closed faces) ---
@@ -2123,15 +2135,17 @@ export function pickPostStockLength(heightAboveGradeFt, postDepthFt, stock = POS
  const stockUse = allow26
   ? stock
   : (stock || POST_STOCK_LENGTHS).filter((L) => L <= 24);
- // Tall-eave jamb 20→22: raised heel or partial enclosed shed lean (Doug).
- // Gable-extension wings (Jim) keep prior jamb ladder.
- const tallJamb22 =
+ // Tall-eave 20→22: raised heel or partial enclosed shed lean (Doug nail-lam).
+ // Compact tall plain (Landon/Pulver 30×40×16, no heel) keeps covering 20′ —
+ // SmartBuild lists ~10@20′ eave stock, not grade-bumped 22′.
+ // Gable-extension wings (Jim) also keep prior ladder.
+ const tallEave22 =
   eaveH >= 16 &&
   (heelOpt > 0 || hasPartialEnclosedShedLean(opts.building));
  const pick = pickPostStockLengthCore(orderH, postDepthFt, stockUse, {
  minGradeSlackFt: isJamb ? 0.05 : embedFt < 0.1 ? 0 : 0.5,
  disableMidGable18: isJamb || !applyMidGable18,
- disableTallEave22: isJamb && !tallJamb22,
+ disableTallEave22: !tallEave22,
  eaveHeightFt: eaveH,
  heelHeightFt: heelOpt,
  });

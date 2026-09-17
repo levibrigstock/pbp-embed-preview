@@ -397,6 +397,64 @@ export function leanToAttachHeight(b, lean) {
  return Math.max(outer, Math.min(mainEave, fromPitch));
 }
 
+/** True when lean pitch matches main (within 0.01) — continuous slope is valid. */
+export function leanPitchMatchesMain(b, lean) {
+  const main = Number(b?.pitch) || 4;
+  const leanP = Number(lean?.pitch);
+  const p = Number.isFinite(leanP) && leanP > 0 ? leanP : main;
+  return Math.abs(p - main) < 0.01;
+}
+
+/**
+ * True when a shed lean on this main wall shares main pitch (flush continuous
+ * roof join — no under-soffit step). Gable leans never match this path.
+ */
+export function mainWallHasMatchingPitchShedLean(b, wall) {
+  return (b?.leanTos || []).some((lt) => {
+    if (!lt || lt.wall !== wall || (Number(lt.depth) || 0) <= 0.1) return false;
+    if ((lt.roofStyle || 'shed') === 'gable') return false;
+    return leanPitchMatchesMain(b, lt);
+  });
+}
+
+/**
+ * Visual outer eave height (ft) for shed lean 3D (enclosed walls/trim AND
+ * open carport posts / eyebrow). Matches js/render/scene.js _addLeanTo:
+ * when stored outer is too close to attach for the pitch, the outer wall/roof
+ * is dropped so the mono reads. Posts, corner trim, and eyebrow must use THIS
+ * height (plus under-roof nest) or they pierce the lean pans up to the stored
+ * (too-tall) eave. Takeoff stock still keys off lean.eaveHeight.
+ *
+ * Same-pitch continuous: outer is clamped to mainE − designRise so a tall
+ * stored eave cannot fight a flush attach at the main eave (stepped lip).
+ */
+export function leanVisualOuterEaveFt(b, lean) {
+  if (!lean) return Number(b?.eaveHeight) || 12;
+  if ((lean.roofStyle || 'shed') === 'gable') {
+    return Number(lean.eaveHeight) || 10;
+  }
+  const mainE = Number(b?.eaveHeight) || 12;
+  const outer = Number(lean.eaveHeight) || 10;
+  const depth = Number(lean.depth) || 0;
+  const pitch = Number(lean.pitch) || Number(b?.pitch) || 4;
+  const designRise = Math.max(
+    leanToRoofRise(lean),
+    depth * (pitch / 12),
+    0.5,
+  );
+  const attach = leanToAttachHeight(b, lean);
+  const continuousOuter = Math.max(8, mainE - designRise);
+  // Same threshold as _addLeanTo (0.45′): not enough drop for pitch → drop outer
+  if (Math.min(mainE, attach) < outer + 0.45) {
+    return continuousOuter;
+  }
+  // Same-pitch: never leave outer above the continuous plane (fights flush attach)
+  if (leanPitchMatchesMain(b, lean) && outer > continuousOuter + 0.05) {
+    return continuousOuter;
+  }
+  return outer;
+}
+
 /**
  * Ridge height above outer eave for a gable attachment.
  * Gable lean ridge runs out from main wall — span is lean length (width of gable), not depth.

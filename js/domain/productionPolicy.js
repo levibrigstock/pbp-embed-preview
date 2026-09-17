@@ -10,6 +10,7 @@
  *
  * Verified against production order lists:
  *   - 30×40×12 plain 4/12, 3″ metal OH → roof 16′2″, girt 35, purlin 36@16+18@12
+ *   - 30×40×16 wood OH (Landon/Pulver) → continuous girt ~44–45, purlin 30@16+38@12 (+lean 12s)
  *   - 55×80×14 + lean 8 + openings, 6″ metal OH → girt 130, purlin 158@16+43@12,
  *     roof 29′11″ / 38′4″
  */
@@ -152,9 +153,28 @@ export function useFullGirtPackage(b) {
   return hasEnclosedLean(b) || H >= 14;
 }
 
-/** Girt pack mode string for takeoff. */
+/**
+ * Compact tall plain: W≤30′, L≤40′, eave≥14′, no enclosed lean.
+ * Girt packing stays continuous LF (~44–45@20′ on 30×40×16) while trim /
+ * opening lumber still use the full package (eave ≥ 14′). Larger tall shops
+ * and enclosed-lean jobs pack per-wall.
+ */
+export function isCompactTallPlainShop(b) {
+  if (hasEnclosedLean(b)) return false;
+  const W = Number(b?.width) || 0;
+  const L = Number(b?.length) || 0;
+  const H = Number(b?.eaveHeight) || 0;
+  return H >= 14 && W > 0 && W <= 30 && L > 0 && L <= 40;
+}
+
+/**
+ * Girt pack mode:
+ *   continuous — small-shop OR compact tall plain (shared LF / 20′ stock)
+ *   per-wall   — full package on larger / lean jobs (waste + opening breaks)
+ */
 export function girtPackMode(b) {
-  return useFullGirtPackage(b) ? 'per-wall' : 'continuous';
+  if (!useFullGirtPackage(b) || isCompactTallPlainShop(b)) return 'continuous';
+  return 'per-wall';
 }
 
 /**
@@ -204,6 +224,8 @@ export function isExplicitMidGableKeep20(b) {
 export function girtIncludeEaveNailer(b) {
   // Long plain shops (L ≥ 80′) still get an eave girt row in benchmark (Harr 40×80 → 68@20′).
   const L = Number(b?.length) || 0;
+  // Compact tall plain: no eave nailer (7 rows → ~44@20′ on 30×40×16).
+  if (isCompactTallPlainShop(b)) return false;
   return useFullGirtPackage(b) || hasEnclosedLean(b) || L >= 80;
 }
 
@@ -462,6 +484,16 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
     }
     const extra = Math.max(0, Math.ceil(rows / 2) - mid12);
     if (extra > 0) counts[12] = (counts[12] || 0) + extra;
+  } else if (!fullLPack && b && hasWoodOverhangStandardEave(b) && L > 0 && L <= 40) {
+    // Short wood-OH shops: demote floor(rows/2) of 16′ → 12′ + ~0.4×rows stubs
+    // → plain 30@16+38@12; open lean adds ~6@12 → Pulver 30/44.
+    const demote = Math.min(counts[16] || 0, Math.floor(rows / 2));
+    if (demote > 0) {
+      counts[16] -= demote;
+      counts[12] = (counts[12] || 0) + demote;
+    }
+    const stubs = Math.max(0, Math.round(rows * 0.4));
+    if (stubs > 0) counts[12] = (counts[12] || 0) + stubs;
   }
 
   return counts;
@@ -541,27 +573,35 @@ export function roofPanelSlopeLengthFt(b) {
 }
 
 /**
- * Order-cut allowance (size-general):
- *   slope < 20′           → 1.5″  (30×40 @ 3″ OH → 16′2″)
- *   slope ≥ 20′, OH < 6″  → 2″    (40×40 → 21′6″; 60×60 → 32′0″ benchmark)
- *   slope ≥ 20′, OH ≥ 6″  → 5.5″  (Levi free side 55′ @ 6″ OH → 29′11″)
+ * Order-cut allowance — ONE primary rule + square-eave bands:
  *
- * Long add is tied to wide metal OH packages, not slope alone — otherwise
- * 60×60 @ 3″ OH wrongly got 32′4″ instead of benchmark 32′0″.
+ *   1) Wood-frame OH (overhangIn ≥ 6″) → always metal drip (3″)
+ *      Explains BOTH Doug (~30′ @ 3/12 → 16′11″) and Pulver (30′ @ 4/12 → 17′3″).
+ *      Same add used on shed lean order cuts when the main has wood OH.
+ *
+ *   2) Square eave (no wood frame OH):
+ *      slope < 20′              → 1.5″ (30×40 @ 3″ OH → 16′2″)
+ *      slope ≥ 20′, metal < 6″  → 2″   (40×40 → 21′6″; 60×60 → 32′0″)
+ *      slope ≥ 20′, metal ≥ 6″  → 5.5″ (Levi free side → 29′11″)
+ *
+ * Long add is tied to wide metal OH, not slope alone — otherwise 60×60 @ 3″
+ * wrongly got 32′4″ instead of benchmark 32′0″.
+ *
+ * Intentional packaging delta (NOT in this formula): some square-eave Job
+ * Reviews (Kane ~32′×4/12) list ~18′4″. Score that as packaging delta vs
+ * formula 17′3″ — do not reintroduce a slope mid-band special case.
+ *
  * @param {number} slopeFt
- * @param {object} [b] building (for metal OH); omit → mid/short only by slope
+ * @param {object} [b] building (for metal / frame OH); omit → mid/short by slope
  */
 export function roofPanelOrderAddInches(slopeFt, b = null) {
-  const s = Number(slopeFt) || 0;
-  if (s < ROOF_ORDER_ADD_MID_AT_FT) {
-    // Mid-short band: ~32′×4/12 @ 3″ OH slope ~17.1′ → benchmark Kane 18′4″ needs ~15″ add.
-    // Keep classic short add (1.5″) below 16.75′ so 30×40 stays 16′2″.
-    if (s >= 16.75 && s < 18.25) return 15;
-    return ROOF_ORDER_ADD_SHORT_IN;
-  }
   const metalIn =
     b != null ? panelMetalOverhangIn(b) : PANEL_METAL_DRIP_MIN_IN;
-  // Wide-OH production (Levi 6″) uses the long ridge/drip allowance
+  // Wood-frame OH packages: order add = metal drip. Slope band does not matter.
+  if (hasWoodOverhangStandardEave(b)) return PANEL_METAL_DRIP_MIN_IN;
+
+  const s = Number(slopeFt) || 0;
+  if (s < ROOF_ORDER_ADD_MID_AT_FT) return ROOF_ORDER_ADD_SHORT_IN;
   if (metalIn >= 6) return ROOF_ORDER_ADD_LONG_IN;
   return ROOF_ORDER_ADD_MID_IN;
 }
@@ -647,7 +687,15 @@ function slabSpec(b, host = null) {
  * No slab → 10″. With slab → max(0, 10 − thickness). 6″ pad → 4″.
  */
 export function wallPanelBelowFloorIn(b, host = null) {
-  const base = WALL_PANEL_BELOW_FLOOR_IN;
+  // Eave wall sheet = eaveHeight + bury.
+  //   square-eave / mono: 10″ bury (30×40 → 12′10″; Tim mono wood-OH keeps 10″)
+  //   wood-frame OH gable: 2″ bury (Pulver 16′ → 16′2″)
+  // With slab: bury = base − slabThickness (6″ pad → base−6).
+  const isMono = (b?.roofStyle || 'gable') === 'mono';
+  const base =
+    hasWoodOverhangStandardEave(b) && !isMono
+      ? 2
+      : WALL_PANEL_BELOW_FLOOR_IN;
   const { hasSlab, thicknessIn } = slabSpec(b, host);
   if (hasSlab) return Math.max(0, base - thicknessIn);
   return base;
@@ -927,7 +975,64 @@ export function buildingCornerTrimSites(b) {
       });
     }
   }
+
+  // An enclosed lean has two outer corners of its own, where an end wall meets
+  // the outer wall. On a lean running the full host wall those land on the main
+  // corners relocated above and dedupe away. On a shorter one they stand out in
+  // the middle of the wall, and nothing listed them — so they were getting no
+  // corner trim in the render and no line on the takeoff.
+  const key = (x, z) => `${Math.round(x * 100)}:${Math.round(z * 100)}`;
+  const seen = new Set(sites.map((s) => key(s.x, s.z)));
+  for (const lt of b?.leanTos || []) {
+    if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
+    if (lt.enclosed === false || lt.enclosure === 'open') continue;
+    const wall = lt.wall || 'left';
+    const depth = Number(lt.depth) || 0;
+    const start = Math.max(0, Number(lt.offset) || 0);
+    const span = leanSpanAlongHost(b, lt);
+    if (span <= 0.1) continue;
+    const ends = [start, start + span];
+    for (let i = 0; i < ends.length; i += 1) {
+      const along = ends[i];
+      const awayFromStart = i === 0 ? -1 : 1;
+      let x;
+      let z;
+      let ox;
+      let oz;
+      if (wall === 'left' || wall === 'right') {
+        x = wall === 'left' ? -depth : W + depth;
+        z = along;
+        ox = wall === 'left' ? -1 : 1;
+        oz = awayFromStart;
+      } else {
+        z = wall === 'front' ? -depth : L + depth;
+        x = along;
+        oz = wall === 'front' ? -1 : 1;
+        ox = awayFromStart;
+      }
+      const k = key(x, z);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      sites.push({
+        x,
+        z,
+        ox,
+        oz,
+        eaveH: Number(lt.eaveHeight) || 10,
+        walls: c0Walls(wall),
+        source: 'lean',
+        // Both faces here belong to the lean and are sheeted whatever the main
+        // building's walls do, so this corner is never gated by openWalls.
+        enclosedCorner: true,
+      });
+    }
+  }
   return sites;
+}
+
+/** Placeholder wall pair for a lean's own corner (never gates it — see above). */
+function c0Walls(wall) {
+  return wall === 'front' || wall === 'back' ? [wall, 'left'] : ['front', wall];
 }
 
 /**
@@ -1080,11 +1185,17 @@ export function describePolicyForBuilding(b) {
   const sides = (b?.roofStyle || 'gable') === 'mono' ? 1 : 2;
   const purlinPack = packMainPurlinBoards(rps * sides, L, b);
   const run = purlinMainRunLengthFt(L);
+  const eaveNail = girtIncludeEaveNailer(b);
+  const pack = girtPackMode(b);
   return {
     orderPackageMode: mode,
-    girtPackage: full ? 'full (eave row + per-wall pack)' : 'small-shop (no eave row + continuous LF)',
-    girtIncludeEave: full,
-    girtPackMode: girtPackMode(b),
+    girtPackage: full
+      ? pack === 'continuous'
+        ? 'full trim; compact continuous girts'
+        : 'full (eave row + per-wall pack)'
+      : 'small-shop (no eave row + continuous LF)',
+    girtIncludeEave: eaveNail,
+    girtPackMode: pack,
     girtOpeningDeduct: girtOpeningDeduct(b),
     purlinStationPad: pad,
     purlinMainRunFt: run,

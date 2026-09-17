@@ -27,6 +27,7 @@ import {
   defaultPublicConfig,
   defaultPublicLeanTo,
   defaultPublicWing,
+  defaultPublicEntryGable,
   defaultPublicOpening,
   validatePublicConfig,
   publicConfigToBuildingPartial,
@@ -42,7 +43,7 @@ import {
   PUBLIC_OPENING_FACE_LABELS,
   PUBLIC_LIMITS,
   PUBLIC_SCHEMA_VERSION,
-} from './publicConfig.js?v=20260917p';
+} from './publicConfig.js?v=20260917s';
 
 import { createProject } from '../domain/types.js?v=20260917r';
 
@@ -84,6 +85,7 @@ async function init() {
     bindMetalAndConcrete();
     bindLeanTos();
     bindWings();
+    bindEntryGables();
     bindOpenings();
     bindQuoteDialog();
 
@@ -232,8 +234,16 @@ function applyConfigToViewer(immediate = false) {
   else rebuildTimer = setTimeout(run, 120);
 }
 
+/**
+ * Warnings the last commit's validate raised while correcting the config.
+ * They survive until the next edit, because re-validating the already-corrected
+ * config would report nothing.
+ */
+let lastCorrections = [];
+
 function renderWarnings() {
-  const { warnings } = validatePublicConfig(config);
+  const { warnings: current } = validatePublicConfig(config);
+  const warnings = [...new Set([...current, ...lastCorrections])];
   const el = $('warnings');
   if (!warnings.length) {
     el.hidden = true;
@@ -478,6 +488,103 @@ function renderWingList() {
     const full = config.wings.length >= PUBLIC_LIMITS.wing.maxCount;
     add.disabled = full;
     add.textContent = full ? `Max ${PUBLIC_LIMITS.wing.maxCount} wings` : '+ Add wing';
+  }
+}
+
+/* ─────────────────────── entry gables ─────────────────────── */
+
+function bindEntryGables() {
+  $('addEntryGable')?.addEventListener('click', () => {
+    if (config.entryGables.length >= PUBLIC_LIMITS.entryGable.maxCount) return;
+    const b = config.building;
+    // Default to something that actually meets the roof: a pitch whose ridge
+    // stays under the main one, on the long wall.
+    const headroom = (b.width / 2) * (b.pitch / 12);
+    const width = Math.min(10, Math.max(4, Math.round(b.length / 4)));
+    const maxPitch = Math.max(1, Math.floor(((headroom / (width / 2)) * 12) * 2) / 2);
+    config.entryGables.push(
+      defaultPublicEntryGable({
+        wall: 'left',
+        width,
+        projection: 4,
+        offset: Math.max(0, Math.round(b.length / 2 - width / 2)),
+        pitch: Math.min(b.pitch, maxPitch),
+      }),
+    );
+    commit();
+    renderEntryGableList();
+  });
+}
+
+function renderEntryGableList() {
+  const host = $('entryGableList');
+  if (!host) return;
+  host.innerHTML = '';
+  config.entryGables.forEach((e, i) => {
+    const item = el('div', 'list-item');
+    item.innerHTML = `
+      <div class="list-head">
+        <strong>Entry gable ${i + 1}</strong>
+        <button type="button" class="link" data-remove>Remove</button>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Wall</label>
+          <select data-sel="wall">
+            <option value="left" ${e.wall === 'left' ? 'selected' : ''}>Left (side wall)</option>
+            <option value="right" ${e.wall === 'right' ? 'selected' : ''}>Right (side wall)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Width (ft, along wall)</label>
+          <input type="number" data-k="width" min="4" max="40" step="1" value="${e.width}" />
+        </div>
+        <div class="field">
+          <label>Projection (ft, 0 = flat)</label>
+          <input type="number" data-k="projection" min="0" max="16" step="1" value="${e.projection}" />
+        </div>
+        <div class="field">
+          <label>Offset (ft)</label>
+          <input type="number" data-k="offset" min="0" max="300" step="1" value="${e.offset}" />
+        </div>
+        <div class="field">
+          <label>Roof pitch (x/12)</label>
+          <input type="number" data-k="pitch" min="1" max="12" step="0.5" value="${e.pitch}" />
+        </div>
+      </div>
+    `;
+
+    item.querySelector('[data-remove]').addEventListener('click', () => {
+      config.entryGables.splice(i, 1);
+      commit();
+      renderEntryGableList();
+    });
+    item.querySelectorAll('[data-k]').forEach((input) => {
+      input.addEventListener('change', () => {
+        e[input.dataset.k] = Number(input.value);
+        config.entryGables[i] = defaultPublicEntryGable(e);
+        commit();
+        // Re-render: the contract may have reduced the pitch to keep its ridge
+        // under the main one, and the field should show what was kept.
+        renderEntryGableList();
+      });
+    });
+    // Only the side walls: a gable end has no roof slope to die into.
+    item.querySelector('[data-sel="wall"]').addEventListener('change', (ev) => {
+      e.wall = ev.target.value;
+      config.entryGables[i] = defaultPublicEntryGable(e);
+      commit();
+      renderEntryGableList();
+    });
+
+    host.appendChild(item);
+  });
+
+  const add = $('addEntryGable');
+  if (add) {
+    const full = config.entryGables.length >= PUBLIC_LIMITS.entryGable.maxCount;
+    add.disabled = full;
+    add.textContent = full ? `Max ${PUBLIC_LIMITS.entryGable.maxCount} entry gables` : '+ Add entry gable';
   }
 }
 
@@ -847,6 +954,22 @@ function formatBuildingSpecs(publicConfig) {
     );
   } else {
     lines.push('Wings: none');
+  }
+  const egs = Array.isArray(publicConfig?.entryGables) ? publicConfig.entryGables : [];
+  if (egs.length) {
+    lines.push(
+      'Entry gables: ' +
+        egs
+          .map(
+            (e) =>
+              `${e.wall} wall, ${e.width}' wide @ ${e.pitch}/12` +
+              (e.projection ? `, ${e.projection}' out on posts` : ', flat on the roof') +
+              (e.offset ? `, ${e.offset}' along` : ''),
+          )
+          .join('; '),
+    );
+  } else {
+    lines.push('Entry gables: none');
   }
   const openings = Array.isArray(publicConfig?.openings) ? publicConfig.openings : [];
   if (openings.length) {
@@ -1338,6 +1461,7 @@ function syncFormFromConfig() {
 
   renderLeanList();
   renderWingList();
+  renderEntryGableList();
   renderOpeningList();
 }
 
@@ -1347,7 +1471,14 @@ function syncWainscotHeightVisibility() {
 
 /** Re-validate, keep form labels honest, refresh viewer. */
 function commit() {
-  config = validatePublicConfig(config).config;
+  const res = validatePublicConfig(config);
+  // The corrected config is written back, so validating it again reports
+  // nothing — which meant every correction the contract made was applied
+  // silently and the customer saw a number they had not typed with no
+  // explanation. Carry this pass's warnings forward so the one that DID the
+  // correcting is the one shown.
+  lastCorrections = res.warnings;
+  config = res.config;
   applyConfigToViewer();
 }
 

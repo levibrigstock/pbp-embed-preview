@@ -124,6 +124,17 @@ export const PUBLIC_LIMITS = {
     eaveHeight: { min: 8, max: 20 },
     maxCount: 4,
   },
+  /**
+   * A cross gable over an entry. A roof feature, so it has no footprint and no
+   * eave height of its own by default — it continues the main eave line.
+   */
+  entryGable: {
+    width: { min: 4, max: 40 },       // along the wall
+    projection: { min: 0, max: 16 },  // past the wall; 0 = flat on the roof
+    offset: { min: 0, max: 300 },
+    pitch: { min: 1, max: 12 },
+    maxCount: 3,
+  },
   opening: {
     width: { min: 1, max: 24 },
     height: { min: 1, max: 16 },
@@ -160,6 +171,7 @@ export function defaultPublicConfig(companyId = 'demo') {
     metalGauge: '29',
     leanTos: [],
     wings: [],
+    entryGables: [],
     openings: [],
     concrete: {
       enabled: false,
@@ -207,6 +219,22 @@ export function defaultPublicWing(partial = {}) {
     garageDoor: partial.garageDoor !== false,
     garageDoorWidth: clampNum(partial.garageDoorWidth, { min: 6, max: 24 }, 16),
     garageDoorHeight: clampNum(partial.garageDoorHeight, { min: 6, max: 16 }, 8),
+  };
+}
+
+/**
+ * A cross gable over an entry. Not a wing and not a lean-to: it has no
+ * footprint, so there is nothing here about slabs, enclosure or eave height —
+ * it sits on the main eave line and dies into the main roof.
+ */
+export function defaultPublicEntryGable(partial = {}) {
+  return {
+    id: partial.id || uid('eg'),
+    wall: pickEnum(partial.wall, PUBLIC_WALLS, 'left'),
+    width: clampNum(partial.width, PUBLIC_LIMITS.entryGable.width, 10),
+    projection: clampNum(partial.projection, PUBLIC_LIMITS.entryGable.projection, 4),
+    offset: clampNum(partial.offset, PUBLIC_LIMITS.entryGable.offset, 0),
+    pitch: clampNum(partial.pitch, PUBLIC_LIMITS.entryGable.pitch, 6),
   };
 }
 
@@ -350,6 +378,52 @@ export function validatePublicConfig(input) {
     return shaped;
   });
 
+  // ── entry gables (cross gables) ──
+  // Clamped against the wall they sit on, and against the MAIN roof: one whose
+  // ridge would clear the main ridge has no valley to die into, and one on a
+  // gable end is a headwall the viewer does not solve. Both are said out loud
+  // rather than left to vanish from the render.
+  const egs = Array.isArray(src.entryGables) ? src.entryGables : [];
+  if (egs.length > PUBLIC_LIMITS.entryGable.maxCount) {
+    warnings.push(`Too many entry gables (${egs.length}); kept first ${PUBLIC_LIMITS.entryGable.maxCount}.`);
+  }
+  out.entryGables = egs.slice(0, PUBLIC_LIMITS.entryGable.maxCount).map((e) => {
+    const shaped = defaultPublicEntryGable(isObject(e) ? e : {});
+    const onEave = shaped.wall === 'left' || shaped.wall === 'right';
+    if (!onEave) {
+      warnings.push(
+        `entry gable ${shaped.id}: a gable end has no roof slope to die into; moved to the left wall.`,
+      );
+      shaped.wall = 'left';
+    }
+    const wallLen = Number(out.building.length) || 0;
+    if (shaped.width > wallLen) {
+      warnings.push(`entry gable ${shaped.id}: width ${shaped.width}' is wider than the wall; trimmed to fit.`);
+      shaped.width = Math.max(PUBLIC_LIMITS.entryGable.width.min, wallLen);
+    }
+    const maxOffset = Math.max(0, wallLen - shaped.width);
+    if (shaped.offset > maxOffset) {
+      warnings.push(`entry gable ${shaped.id}: offset ${shaped.offset}' would hang off the wall; moved to ${maxOffset}'.`);
+      shaped.offset = maxOffset;
+    }
+    // Its ridge must stay under the main ridge or there is nothing to meet.
+    const mainEave = Number(out.building.eaveHeight) || 12;
+    const mainRidge = mainEave + ((Number(out.building.width) || 0) / 2) * ((Number(out.building.pitch) || 4) / 12);
+    const headroom = mainRidge - mainEave;
+    const maxPitch = shaped.width > 0 ? (headroom / (shaped.width / 2)) * 12 : 12;
+    if (shaped.pitch > maxPitch + 1e-9) {
+      const next = Math.max(
+        PUBLIC_LIMITS.entryGable.pitch.min,
+        Math.floor(maxPitch * 2) / 2,
+      );
+      warnings.push(
+        `entry gable ${shaped.id}: pitch ${shaped.pitch}/12 puts its ridge above the main ridge; reduced to ${next}/12.`,
+      );
+      shaped.pitch = next;
+    }
+    return shaped;
+  });
+
   // ── openings ──
   // Validated AFTER lean-tos so a lean-to host can be checked for existence +
   // enclosure and the face clamped to a real value.
@@ -433,6 +507,16 @@ export function stripSecretsFromConfig(anyConfig) {
         // Wings are separate BUILDINGS, so a single internal building object
         // cannot see them; they only survive on the public-shaped path below.
         wings: [],
+        // Cross gables live on the building itself, so an internal building
+        // CAN carry them through.
+        entryGables: (src.crossGables || []).map((cg) => ({
+          id: cg.id,
+          wall: cg.wall,
+          width: cg.width,
+          projection: cg.projection,
+          offset: cg.offset,
+          pitch: cg.pitch,
+        })),
         leanTos: (src.leanTos || []).map((lt) => ({
           id: lt.id,
           wall: lt.wall,
@@ -521,6 +605,17 @@ export function publicConfigToBuildingPartial(publicConfig) {
       enclosed: lt.enclosed,
       pitch: lt.pitch,
       ...(lt.eaveHeight != null ? { eaveHeight: lt.eaveHeight } : {}),
+    })),
+
+    // Cross gables sit ON this building, so unlike wings they are part of it
+    // rather than a separate one.
+    crossGables: cfg.entryGables.map((e) => ({
+      id: e.id,
+      wall: e.wall,
+      width: e.width,
+      projection: e.projection,
+      offset: e.offset,
+      pitch: e.pitch,
     })),
 
     openings: cfg.openings.map((op) => {

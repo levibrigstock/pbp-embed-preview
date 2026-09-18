@@ -127,6 +127,7 @@ export function createCrossGable(partial = {}) {
   const wall = WALLS.includes(partial.wall) ? partial.wall : 'left';
   return {
     id: partial.id || uid('cg'),
+    name: (partial.name && String(partial.name).trim()) || 'Entry gable',
     wall,
     /** Along the wall, from its origin corner, to the gable's near edge. */
     offset: Math.max(0, Number(partial.offset) || 0),
@@ -611,6 +612,11 @@ export function normalizePartOverrides(raw) {
  else if (v.gauge === '29' || v.gauge === 29) entry.gauge = '29';
  if (v.note) entry.note = String(v.note).slice(0, 200);
  if (v.label) entry.label = String(v.label).slice(0, 120);
+ const wall = String(v.wall || '').toLowerCase();
+ if (['front', 'back', 'left', 'right'].includes(wall)) entry.wall = wall;
+ if (v.offsetFt != null && v.offsetFt !== '' && Number.isFinite(Number(v.offsetFt))) {
+ entry.offsetFt = roundPartFt(Number(v.offsetFt));
+ }
  if (Object.keys(entry).length) out[id] = entry;
  }
  return out;
@@ -625,6 +631,104 @@ export function partOverride(building, partId) {
 
 export function isPartSuppressed(building, partId) {
  return !!partOverride(building, partId)?.suppressed;
+}
+
+/**
+ * Distance along a wall from the left end (outside face), matching opening offsets.
+ * front/back → X; left/right → Z.
+ */
+export function postOffsetAlongWall(b, wall, x, z) {
+ const W = Number(b?.width) || 0;
+ const L = Number(b?.length) || 0;
+ const xx = Number(x) || 0;
+ const zz = Number(z) || 0;
+ if (wall === 'front' || wall === 'back') {
+ return roundPartFt(Math.max(0, Math.min(W, xx)));
+ }
+ if (wall === 'left' || wall === 'right') {
+ return roundPartFt(Math.max(0, Math.min(L, zz)));
+ }
+ // Infer wall from position if not provided
+ if (Math.abs(zz) < 0.15) return roundPartFt(Math.max(0, Math.min(W, xx)));
+ if (Math.abs(zz - L) < 0.15) return roundPartFt(Math.max(0, Math.min(W, xx)));
+ if (Math.abs(xx) < 0.15) return roundPartFt(Math.max(0, Math.min(L, zz)));
+ if (Math.abs(xx - W) < 0.15) return roundPartFt(Math.max(0, Math.min(L, zz)));
+ return roundPartFt(xx);
+}
+
+/** Convert wall + offset-from-left (ft) → plan X/Z on that wall line. */
+export function wallOffsetToXZ(b, wall, offsetFt) {
+ const W = Number(b?.width) || 0;
+ const L = Number(b?.length) || 0;
+ const u = Number(offsetFt) || 0;
+ if (wall === 'front') return { x: Math.max(0, Math.min(W, u)), z: 0 };
+ if (wall === 'back') return { x: Math.max(0, Math.min(W, u)), z: L };
+ if (wall === 'left') return { x: 0, z: Math.max(0, Math.min(L, u)) };
+ if (wall === 'right') return { x: W, z: Math.max(0, Math.min(L, u)) };
+ return { x: u, z: 0 };
+}
+
+/** Infer primary wall for a post at x/z (corners prefer primaryWall if given). */
+export function inferPostWall(b, x, z, preferredWall = null) {
+ if (preferredWall && ['front', 'back', 'left', 'right'].includes(preferredWall)) {
+ return preferredWall;
+ }
+ const W = Number(b?.width) || 0;
+ const L = Number(b?.length) || 0;
+ const xx = Number(x) || 0;
+ const zz = Number(z) || 0;
+ const eps = 0.2;
+ const onFront = Math.abs(zz) < eps;
+ const onBack = Math.abs(zz - L) < eps;
+ const onLeft = Math.abs(xx) < eps;
+ const onRight = Math.abs(xx - W) < eps;
+ if (onFront && !onLeft && !onRight) return 'front';
+ if (onBack && !onLeft && !onRight) return 'back';
+ if (onLeft && !onFront && !onBack) return 'left';
+ if (onRight && !onFront && !onBack) return 'right';
+ // Corner: prefer eave (left/right) then gable
+ if (onLeft) return 'left';
+ if (onRight) return 'right';
+ if (onFront) return 'front';
+ if (onBack) return 'back';
+ return 'front';
+}
+
+/**
+ * Apply Advanced Edit placement override to a generated post.
+ * Returns { x, z, wall, offsetFt, partId }.
+ */
+export function resolvePostWorldPos(b, post) {
+ const ox = Number(post.x) || 0;
+ const oz = Number(post.z) || 0;
+ const partId = postPartId(ox, oz, post.leanToId ? `lean:${post.leanToId}` : 'main');
+ const ov = partOverride(b, partId);
+ const preferred =
+ (ov && ov.wall) ||
+ post.primaryWall ||
+ (Array.isArray(post.walls) ? post.walls[0] : null) ||
+ (post.walls instanceof Set ? [...post.walls][0] : null);
+ const wall = inferPostWall(b, ox, oz, preferred);
+ let offsetFt =
+ ov && ov.offsetFt != null
+ ? Number(ov.offsetFt)
+ : post.alongFt != null
+ ? Number(post.alongFt)
+ : postOffsetAlongWall(b, wall, ox, oz);
+ const max = wallLength(b, wall);
+ offsetFt = Math.max(0, Math.min(max, offsetFt));
+ offsetFt = roundPartFt(offsetFt);
+ if (ov && ov.offsetFt != null && ov.wall) {
+ const pos = wallOffsetToXZ(b, ov.wall || wall, offsetFt);
+ return { x: pos.x, z: pos.z, wall: ov.wall || wall, offsetFt, partId, moved: true };
+ }
+ return { x: ox, z: oz, wall, offsetFt, partId, moved: false };
+}
+
+
+/** Main building uses stud walls (no perimeter posts). */
+export function isStudFrame(b) {
+ return String(b?.frameSystem || 'post').toLowerCase() === 'stud';
 }
 
 export function createBuilding(partial = {}) {
@@ -645,6 +749,20 @@ export function createBuilding(partial = {}) {
  : 'common',
  /** Parallel-chord / attic depth helper (ft). Default 3.5′. */
  trussDepthFt: partial.trussDepthFt ?? 3.5,
+ /**
+     * Wall framing system:
+     * - 'post' = post-frame (default): 6x6 posts + girts + treated skirt
+     * - 'stud' = stud-frame: studs + treated bottom plate (no perimeter posts)
+     */
+ frameSystem: partial.frameSystem === 'stud' ? 'stud' : 'post',
+ /** Stud lumber when frameSystem === 'stud'. */
+ studSize: ['2x4', '2x6', '2x8'].includes(partial.studSize)
+ ? partial.studSize
+ : '2x6',
+ /** Stud spacing o.c. (inches): 16 or 24. */
+ studSpacingIn: [16, 24].includes(Number(partial.studSpacingIn))
+ ? Number(partial.studSpacingIn)
+ : 16,
  postSpacing: partial.postSpacing ?? 10,
  /** Embedment / hole depth below grade (ft). Typical frost range 3–6. */
  postDepthFt: partial.postDepthFt ?? 3,

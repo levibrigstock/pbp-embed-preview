@@ -1,0 +1,135 @@
+# Publish the public configurator embed on every push to main.
+#
+# This repo is a PACKAGE, not a source tree: scripts/pack-embed.sh in
+# polebarn-pro copies the public import graph here and the result is what
+# customers iframe. It had no CI at all — the site was last published by hand as
+# a drag-and-drop deploy, which is how it drifted a week behind the app.
+#
+# ARMING: needs one repository secret, NETLIFY_AUTH_TOKEN (Netlify → User
+# settings → Applications → New access token). Until it exists the workflow
+# still runs and still checks, then stops short of deploying and says so rather
+# than failing red.
+
+name: Deploy embed to Netlify
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: netlify-embed
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Check, stage and publish
+    runs-on: ubuntu-latest
+    env:
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ed38b325-9db1-4e66-83a7-307f11f5160a
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # There is no build and no test suite here, so these stand in for one.
+      # They are not ceremony: every one of them is a way this package has
+      # actually been broken or could silently ship broken.
+      - name: Check the package is intact
+        run: |
+          set -euo pipefail
+          fail=0
+          note() { echo "::error::$1"; fail=1; }
+
+          # The entry point customers load.
+          [ -s public/embed.html ] || note "public/embed.html is missing or empty"
+
+          # pack-embed.sh wipes this directory with find -delete and the real
+          # lead config has to be restored afterwards. Losing it does not break
+          # the page, it breaks lead capture silently — no error, just quotes
+          # that never arrive. Worth failing the deploy over.
+          if [ ! -s public/lead-config.json ]; then
+            note "public/lead-config.json is missing — leads would be dropped silently"
+          else
+            python3 -c "import json,sys; json.load(open('public/lead-config.json'))" \
+              || note "public/lead-config.json is not valid JSON"
+          fi
+
+          # Three.js is vendored, not fetched. A missing vendor file renders a
+          # blank iframe on a customer's site.
+          for f in vendor/three-embed.module.js vendor/OrbitControls-embed.js; do
+            [ -s "$f" ] || note "$f is missing — the viewer would not load"
+          done
+
+          # Every module reachable from the entry point must actually be here.
+          # This is the failure pack-embed.sh has hit twice: a new js/domain
+          # module gets imported but not copied, so the embed 404s on load
+          # while the source repo looks perfectly fine. Resolved properly by
+          # walking the graph — counting import lines would prove nothing.
+          python3 scripts/check-import-graph.py || fail=1
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "package OK"
+
+      # Publish a staged copy rather than the repo root. netlify.toml says
+      # publish = "." and a hand-dropped folder never contained .git or
+      # .github — deploying the checkout as-is would start serving this
+      # workflow file from the public site. Staging keeps what customers get
+      # identical to what they got before CI existed.
+      - name: Stage the publish directory
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site
+          # tar rather than rsync: rsync is not guaranteed on every runner
+          # image and this needs no rsync feature. .nojekyll and _headers are
+          # dotfile-ish but must ship, so the copy is "everything except", not
+          # a list of what to include.
+          tar -cf - \
+            --exclude=./.git \
+            --exclude=./.github \
+            --exclude=./scripts \
+            --exclude=./_site \
+            . | tar -xf - -C _site
+          echo "staged $(find _site -type f | wc -l) files"
+          # scripts/ is CI tooling and .github is this workflow; neither is
+          # part of what a customer's iframe loads.
+          for leak in .git .github scripts; do
+            [ -e "_site/$leak" ] && { echo "::error::$leak reached the publish directory"; exit 1; }
+          done
+          # -f, not -s: .nojekyll is conventionally an EMPTY file, so a size
+          # test reports it missing on every single deploy.
+          test -f _site/.nojekyll || echo "::warning::.nojekyll missing from _site"
+          test -s _site/public/embed.html
+          test -s _site/public/lead-config.json
+
+      - name: Publish to Netlify
+        if: env.NETLIFY_AUTH_TOKEN != ''
+        env:
+          COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          MSG="$(printf '%s' "${COMMIT_SUBJECT:-manual dispatch}" | head -n 1)"
+          npx -y netlify-cli@latest deploy \
+            --prod \
+            --no-build \
+            --dir=_site \
+            --site="$NETLIFY_SITE_ID" \
+            --created-via="github-actions" \
+            --message="${GITHUB_SHA:0:7} — $MSG"
+
+      - name: Not armed — skipping deploy
+        if: env.NETLIFY_AUTH_TOKEN == ''
+        run: |
+          echo "::warning title=Netlify deploy skipped::NETLIFY_AUTH_TOKEN is not set."
+          {
+            echo "### Embed deploy skipped"
+            echo
+            echo "The package checks passed and \`_site/\` was staged, but nothing was published."
+            echo
+            echo "To arm: add a \`NETLIFY_AUTH_TOKEN\` repository secret"
+            echo "(Netlify → User settings → Applications → New access token)."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -36,7 +36,7 @@ import {
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260917h';
+} from './productionPolicy.js?v=20260918ohlumber';
 import { ellBuriedRunOnWall } from './ell.js?v=20260917g';
 
 /**
@@ -1180,8 +1180,19 @@ export function computeLeanToMaterials(b, lean, dims) {
  (Number.isFinite(metalInRaw) && metalInRaw > 0 ? metalInRaw : 3) / 12;
  const mainFrameIn = Number(b.overhangIn) || 0;
  const leanFrameIn = Number(lean.overhangIn) || 0;
+ // A lean's OWN framed overhang was never read here: only gable-extensions
+ // used leanFrameIn, so a shed or gable lean silently inherited the main
+ // building's overhang and ignored its own. Setting overhangIn on a lean
+ // produced a material list identical to the cent.
+ //
+ // The lean's own value wins when it has one; otherwise the main is inherited
+ // exactly as before, which is what keeps Pulver (12" main + 3" metal on an
+ // 8' x 4/12 shed lean -> 9'11") reading the same.
+ const leanOwnFrameOh = hasWoodOverhangStandardEave(lean);
  const frameOhOrderFt = isGableExt
  ? (leanFrameIn || mainFrameIn) / 12
+ : leanOwnFrameOh
+ ? leanFrameIn / 12
  : mainFrameIn >= 6
  ? mainFrameIn / 12
  : 0;
@@ -1191,9 +1202,13 @@ export function computeLeanToMaterials(b, lean, dims) {
  : depth + metalOhOrderFt + frameOhOrderFt;
  // Gable-extension: rise on full half-span incl. OH (Jim → 20'5"). Plain gable
  // lean keeps rise on building half-depth only (Mark/Prater locks).
+ // Rise on the building depth alone is the ordering convention the shed-lean
+ // benchmarks were built on (Mark/Prater/Pulver), so an INHERITED main overhang
+ // keeps it. A lean's own framed overhang continues down the same roof plane —
+ // run and rise grow together — so that case uses the full span.
  const riseRun = isGable
  ? (isGableExt ? halfSpan : depth / 2) * leanPitchRatio
- : depth * leanPitchRatio;
+ : (leanOwnFrameOh ? halfSpan : depth) * leanPitchRatio;
  const leanOrderSlope = Math.hypot(halfSpan, riseRun);
  // Same order-add policy as main roof (wood OH → 3″ drip; else short/mid).
  const leanAddIn = roofPanelOrderAddInches(leanOrderSlope, {

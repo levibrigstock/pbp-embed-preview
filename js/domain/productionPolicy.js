@@ -850,9 +850,30 @@ export function includeFullTrimPackage(b) {
   return useFullGirtPackage(b);
 }
 
-/** Alias — framing extras (sub-fascia, gable fly) use the same gate. */
+/**
+ * Framing extras: eave/gable sub-fascia, gable fly (lookout) rafters, rake ends.
+ *
+ * Two independent reasons to need these, and for a long time only the first was
+ * checked — so a framed overhang bought soffit, fascia and longer roof panels
+ * with no lumber under them to fasten any of it to, while a tall square-eave
+ * shop was billed lookouts it had no overhang for.
+ *
+ *   1. The full production package (large / tall / enclosed-lean jobs). Kept
+ *      because it is how these jobs are really ordered: the Levi 55x80x14
+ *      benchmark carries overhangIn 0 with a 6" METAL rake and its real order
+ *      still included 24 lookouts, 2 rake ends and eave sub-fascia. A
+ *      metal-only overhang still needs a ladder to carry it.
+ *
+ *   2. A framed overhang, which is the part that was missing. >= 6" of
+ *      structural overhang is carried by lookouts off the end truss, not by
+ *      ordering a deeper truss, so the lumber has to appear on the list.
+ *
+ * Either is sufficient; neither is necessary. Widening rather than replacing
+ * is deliberate — keying this on overhang alone would have stripped 30 pieces
+ * of framing out of the Levi order.
+ */
 export function includeFullFramingExtras(b) {
-  return useFullGirtPackage(b);
+  return useFullGirtPackage(b) || hasWoodOverhangStandardEave(b);
 }
 
 /**

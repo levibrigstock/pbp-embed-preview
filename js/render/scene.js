@@ -6,7 +6,7 @@
 import * as THREE from '../../vendor/three.module.js';
 // Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
 import { OrbitControls } from '../../vendor/OrbitControls.js';
-import { generateFraming } from '../domain/framing.js?v=20260917postPlace';
+import { generateFraming } from '../domain/framing.js?v=20260918leanoh2';
 import {
  roofRise,
  wallLength,
@@ -36,7 +36,7 @@ import {
  enclosedLeanCoveringCorner,
  includeFullFramingExtras,
  gableFlyRafterQty,
-} from '../domain/productionPolicy.js?v=20260917h';
+} from '../domain/productionPolicy.js?v=20260918ohlumber';
 import { trussMemberLayout } from '../domain/trussTypes.js?v=20260917openjson2';
 import { gableLeanGeometry, gableLeanValley } from '../domain/gableLean.js?v=20260916k';
 import { ellGeometry, resolveEllPlacements } from '../domain/ell.js?v=20260917i';

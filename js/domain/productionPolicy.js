@@ -689,9 +689,9 @@ function slabSpec(b, host = null) {
  * No slab → 10″. With slab → max(0, 10 − thickness). 6″ pad → 4″.
  */
 export function wallPanelBelowFloorIn(b, host = null) {
-  // Eave wall sheet = eaveHeight + bury.
+  // Eave wall sheet = eaveHeight + heelHeightFt + bury (see eaveWallPanelHeightFt).
   //   square-eave / mono: 10″ bury (30×40 → 12′10″; Tim mono wood-OH keeps 10″)
-  //   wood-frame OH gable: 2″ bury (Pulver 16′ → 16′2″)
+  //   wood-frame OH gable: 2″ bury (Pulver 16′ → 16′2″; +heel when raised seat)
   // With slab: bury = base − slabThickness (6″ pad → base−6).
   const isMono = (b?.roofStyle || 'gable') === 'mono';
   const base =
@@ -710,12 +710,16 @@ export function wallPanelSlabShortenIn(b, host = null) {
 
 export function eaveWallPanelHeightFt(b) {
   const eave = Number(b?.eaveHeight) || 12;
+  // Raised heel lifts the top-of-wall / FJ plane (Doug SB 2′6″ → eave wall
+  // above 3′ wainscot lands ~15′5–15′6″, not eave-only ~13′). Heel 0 is a no-op
+  // for square/wood-OH shops without a raised seat (Pulver stays eave+bury).
+  const heel = Math.max(0, Number(b?.heelHeightFt) || 0);
   // Pad-aware bury: 10″ no slab, 10″ − slab thk with pad (6″ → 4″).
   // Peak-snap (32×12): +12″ tuck so no-slab ≈ eave+22″; with 6″ pad ≈ eave+16″.
   const below = wallPanelBelowFloorIn(b);
   const ladder = gablePanelLadderInches(b);
   const peakTuck = ladder === 6 ? 12 : 0;
-  return eave + (below + peakTuck) / 12;
+  return eave + heel + (below + peakTuck) / 12;
 }
 
 // ── Trim packing (10' pieces unless noted) ──────────────────────────

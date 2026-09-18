@@ -36,7 +36,7 @@ import {
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260918ohlumber';
+} from './productionPolicy.js?v=20260918dougLean3';
 import { ellBuriedRunOnWall } from './ell.js?v=20260917g';
 
 /**
@@ -1411,30 +1411,12 @@ export function generateGirts(b) {
   // Dual enclosed eave leans: skip shared main eaves (interior to wings).
   if (dualEaveLeans && (wall === 'left' || wall === 'right')) continue;
   let len = wallLength(b, wall);
-  // Partial enclosed lean on this wall: covered span is interior to the lean
-  // (no exterior girts). Full-length leans (length≤0 ⇒ full wall) keep the
-  // host run — Levi counts main host + lean outer. Strictly partial only.
-  if (!dualEaveLeans) {
-  for (const lean of b.leanTos || []) {
-  if (!lean || lean.wall !== wall || !isLeanEnclosed(lean)) continue;
-  // Gable-extension shares a gable end — keep host girts (Jim wing).
-  if ((lean.kind || 'leanto') === 'gable-extension') continue;
-  const wallLen = wallLength(b, wall);
-  const offset = Number(lean.offset) || 0;
-  const leanLen =
-  Number(lean.length) > 0
-  ? Math.min(Number(lean.length) || 0, wallLen - offset)
-  : 0; // length≤0 → full-cover; do not reduce (Levi)
-  if (!(leanLen > 0.1) || leanLen >= wallLen - 0.1) continue;
-  len = Math.max(0, len - leanLen);
-  }
-  }
-  // A wing butted to this wall makes that stretch interior exactly as a
-  // partial enclosed lean does — girts there are inside the wing, not on an
-  // exterior wall. Unlike a lean, a FULL-length wing still reduces the run:
-  // the Levi exception exists because a lean's outer wall is billed
-  // separately as lean skin, while a wing is a whole building already billing
-  // its own girts.
+  // Partial enclosed shed lean: KEEP host-wall girts through the lean span.
+  // SmartBuild still orders main-wall #3YP field girts on that stretch (Doug
+  // 30×60 + 20′ lean → ~124 total); lean outer/ends are additive. Omitting
+  // the host span under-counted ~1 board/row × levels (~8–10 pcs).
+  // Full-length leans (Levi) and dual eave wings unchanged (dual skips eaves).
+  // Ell wings still bury the host run — a wing is its own building billing girts.
   len = Math.max(0, len - Math.min(ellBuriedRunOnWall(b, wall), len));
   if (len > 0.1) {
   runs.push({ wall, lengthFt: len, rows: levels.length, host: 'main' });

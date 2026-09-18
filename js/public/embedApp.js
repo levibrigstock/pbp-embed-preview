@@ -157,7 +157,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260918leanoh2');    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
+    const { SceneView } = await import('../render/scene.js?v=20260918dougLean3');    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
     scene = new SceneView(canvas, {
       lite: true,
       onWallClick: (data) => placeOpeningFromViewer(data),

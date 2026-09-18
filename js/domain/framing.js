@@ -21,7 +21,8 @@ import {
  isLeanFaceOpen,
  leanOpenFaceList,
  roundFtToNearestInch,
-} from './types.js?v=20260917r';
+ isStudFrame,
+} from './types.js?v=20260917postPlace';
 import {
  useFullGirtPackage,
  girtPackMode,
@@ -1718,6 +1719,84 @@ export function openingFraming(openings, b = {}) {
 /**
  * Full framing package for one building (main + lean-tos).
  */
+
+/**
+ * Stud-frame walls (main building): vertical studs + treated bottom plate + top plate.
+ * No perimeter posts. Open walls skipped (drive-through).
+ * Corner studs are shared (deduped by world x/z).
+ */
+export function generateStudWalls(b) {
+ const size = ['2x4', '2x6', '2x8'].includes(b.studSize) ? b.studSize : '2x6';
+ const spacingIn = [16, 24].includes(Number(b.studSpacingIn))
+ ? Number(b.studSpacingIn)
+ : 16;
+ const sp = spacingIn / 12;
+ const H = Math.max(6, Number(b.eaveHeight) || 12);
+ const W = Number(b.width) || 30;
+ const L = Number(b.length) || 40;
+ /** @type {{ wall: string, u: number, x: number, z: number, heightFt: number, size: string }[]} */
+ const studs = [];
+ let bottomPlateLf = 0;
+ let topPlateLf = 0;
+ const seen = new Set();
+
+ const pushStud = (wall, u, x, z) => {
+ const key = `${Math.round(x * 100)}_${Math.round(z * 100)}`;
+ if (seen.has(key)) return;
+ seen.add(key);
+ studs.push({
+ wall,
+ u,
+ x,
+ z,
+ heightFt: H,
+ size,
+ });
+ };
+
+ for (const wall of closedWallList(b)) {
+ const len = wallLength(b, wall);
+ if (!(len > 0.1)) continue;
+ bottomPlateLf += len;
+ topPlateLf += len;
+ for (let u = 0; u <= len + 1e-9; u += sp) {
+ const uu = Math.min(Math.round(u * 1000) / 1000, len);
+ let x = 0;
+ let z = 0;
+ if (wall === 'front') {
+ x = uu;
+ z = 0;
+ } else if (wall === 'back') {
+ x = uu;
+ z = L;
+ } else if (wall === 'left') {
+ x = 0;
+ z = uu;
+ } else {
+ x = W;
+ z = uu;
+ }
+ pushStud(wall, uu, x, z);
+ }
+ // Ensure far corner on this wall
+ if (wall === 'front') pushStud(wall, len, len, 0);
+ else if (wall === 'back') pushStud(wall, len, len, L);
+ else if (wall === 'left') pushStud(wall, len, 0, len);
+ else pushStud(wall, len, W, len);
+ }
+
+ return {
+ studs,
+ studCount: studs.length,
+ bottomPlateLf,
+ topPlateLf,
+ size,
+ spacingIn,
+ treatedBottomPlate: true,
+ note: 'Stud-frame: treated bottom plate matches stud size; anchors @ 2′ o.c.',
+ };
+}
+
 export function generateFraming(b) {
  // Normalize stale lean outer eaves (old default pitch 3 → 12' on 14'/8' lean)
  // so posts, metal, and girts share production geometry.
@@ -1757,7 +1836,9 @@ export function generateFraming(b) {
  lt.eaveHeight = roundFtToNearestInch(cur);
  }
  }
- const mainPosts = generateMainPosts(b);
+ const studFrame = isStudFrame(b);
+ // Stud-frame: no main perimeter posts (leans still post-framed).
+ const mainPosts = studFrame ? [] : generateMainPosts(b);
  const leanPackages = (b.leanTos || []).map((lt) => ({
  lean: lt,
  ...generateLeanToPosts(b, lt, mainPosts),
@@ -1768,9 +1849,59 @@ export function generateFraming(b) {
  .flatMap((p) => p.posts)
  .filter((p) => !mainKeys.has(keyXZ(p.x, p.z)));
  const girts = generateGirts(b);
+ // Stud-frame: keep wall girts, but lumber matches stud size (2x4/2x6/2x8).
+ if (studFrame && girts) {
+ girts.size = ['2x4', '2x6', '2x8'].includes(b.studSize) ? b.studSize : '2x6';
+ girts.note = 'Stud-frame girts match stud size';
+ }
  const purlins = generatePurlins(b);
  const trusses = generateTrusses(b);
- const skirt = generateSkirt(b);
+ // Stud-frame uses treated bottom plate instead of skirt on main perimeter.
+ // Lean skirt faces still needed when enclosed leans exist — keep lean portion
+ // by generating full skirt then zeroing when no leans, else full generateSkirt
+ // for leans only is complex; for stud: skip main skirt via generateSkirt still
+ // counting main — override: if studFrame, compute skirt from leans only.
+ let skirt;
+ if (studFrame) {
+ const full = generateSkirt(b);
+ // Approximate: stud bottom plate covers main; keep lean face LF only by
+ // regenerating note — simplest: zero skirt (bottom plate is separate) and
+ // lean base boards come from lean materials if any. Prefer zero main skirt.
+ skirt = {
+ linearFt: 0,
+ runs: [],
+ size: b.studSize || '2x6',
+ note: 'Stud-frame: main skirt replaced by treated bottom plate',
+ };
+ // Add enclosed-lean skirt faces only
+ for (const lean of b.leanTos || []) {
+ if (!isLeanEnclosed(lean)) continue;
+ const wallLen = wallLength(b, lean.wall);
+ const offset = Number(lean.offset) || 0;
+ const length =
+ lean.length > 0
+ ? Math.min(Number(lean.length) || 0, wallLen - offset)
+ : wallLen - offset;
+ const depth = Number(lean.depth) || 0;
+ if (!(length > 0.1) || !(depth > 0.1)) continue;
+ if (!isLeanFaceOpen(lean, 'outer')) {
+ skirt.linearFt += length;
+ skirt.runs.push({ lengthFt: length, rows: 1 });
+ }
+ if (!isLeanFaceOpen(lean, 'leftEnd')) {
+ skirt.linearFt += depth;
+ skirt.runs.push({ lengthFt: depth, rows: 1 });
+ }
+ if (!isLeanFaceOpen(lean, 'rightEnd')) {
+ skirt.linearFt += depth;
+ skirt.runs.push({ lengthFt: depth, rows: 1 });
+ }
+ }
+ skirt.size = b.skirtSize || '2x6';
+ } else {
+ skirt = generateSkirt(b);
+ }
+ const studWalls = studFrame ? generateStudWalls(b) : null;
  const trussCarriers = generateTrussCarriers(b);
  const openings = openingFraming(b.openings || [], b);
 
@@ -1866,6 +1997,7 @@ export function generateFraming(b) {
  purlins,
  trusses,
  skirt,
+ studWalls,
  trussCarriers,
  openings,
  leanPackages,

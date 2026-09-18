@@ -1,5 +1,5 @@
 PoleBarn Pro — public configurator embed package
-built: 2026-09-17T21:19:17Z
+built: 2026-09-18T17:08:32Z
 entry: /public/embed.html?companyId=demo
 pack:  scripts/pack-embed.sh
 docs:  EMBED_HOSTING.md (repo root)

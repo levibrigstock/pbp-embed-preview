@@ -342,6 +342,11 @@
       font-weight: 600;
     }
     .list-item.flash { animation: flashfade 1.1s ease; }
+    .list-item.selected-item {
+      outline: 2px solid var(--accent, #1b4f72);
+      outline-offset: 1px;
+      background: color-mix(in srgb, var(--accent, #1b4f72) 10%, transparent);
+    }
     @keyframes flashfade {
       from { border-color: var(--accent); background: rgba(124, 77, 255, 0.22); }
       to { border-color: var(--line); background: var(--panel-2); }
@@ -483,6 +488,10 @@
             <label for="wainscotColor">Wainscot</label>
             <select id="wainscotColor" data-color></select>
           </div>
+          <div class="field">
+            <label for="garageDoorColor">Garage door</label>
+            <select id="garageDoorColor" data-color></select>
+          </div>
           <div class="field" id="wainscotHeightWrap" hidden>
             <label for="wainscotHeight">Wainscot height (ft)</label>
             <input type="number" id="wainscotHeight" min="0" max="6" step="0.5" title="0 = no wainscot" />
@@ -544,7 +553,8 @@
         Pick a type, then tap a wall in the 3D view to drop it — a main wall or
         an enclosed lean-to wall. Turn on <em>Move on wall</em> to drag any
         opening along its wall. Exact sizes, offsets and the wall/face are
-        editable in the list.
+        editable in the list. Tap an opening again, press Esc, or
+        <em>Clear selection</em> to remove the highlight.
       </p>
       <div class="palette" id="openingPalette">
         <button type="button" class="chip" data-add-type="window">+ Window</button>
@@ -555,6 +565,7 @@
       <div class="row">
         <button type="button" class="small" id="addOpening">+ Add (no placement)</button>
         <button type="button" class="small toggle" id="moveOpeningToggle">Move on wall</button>
+        <button type="button" class="small" id="clearOpeningSelection" title="Remove the highlight from the selected opening">Clear selection</button>
       </div>
 
       <p class="warnings" id="warnings" hidden></p>
@@ -606,5 +617,5 @@
     </form>
   </dialog>
 
-  <script type="module" src="../js/public/embedApp.js?v=20260918dougLean3"></script></body>
+  <script type="module" src="../js/public/embedApp.js?v=20260921viewer1"></script></body>
 </html>

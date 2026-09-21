@@ -6,7 +6,7 @@
 import * as THREE from '../../vendor/three.module.js';
 // Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
 import { OrbitControls } from '../../vendor/OrbitControls.js';
-import { generateFraming } from '../domain/framing.js?v=20260918dougLean3';
+import { generateFraming } from '../domain/framing.js?v=20260921freight1';
 import {
  roofRise,
  wallLength,
@@ -28,15 +28,24 @@ import {
  partOverride,
  isStudFrame,
  resolvePostWorldPos,
-} from '../domain/types.js?v=20260917postPlace';
+ normalizeSlideMode,
+} from '../domain/types.js?v=20260921freight1';
 import {
  wallPanelBelowFloorIn,
  buildingCornerTrimSites,
  mainWallHasEnclosedLean,
  enclosedLeanCoveringCorner,
  includeFullFramingExtras,
+ includeFullTrimPackage,
  gableFlyRafterQty,
 } from '../domain/productionPolicy.js?v=20260918dougLean3';
+import { partColor } from '../domain/colorPlan.js?v=20260920colors1';
+import {
+ resolveSoffitFascia,
+ eaveAssemblyFaceFt,
+ runIsVented,
+ soffitColorSource,
+} from '../domain/soffitFascia.js?v=20260918soffit2';
 import { trussMemberLayout } from '../domain/trussTypes.js?v=20260917openjson2';
 import { gableLeanGeometry, gableLeanValley } from '../domain/gableLean.js?v=20260916k';
 import { ellGeometry, resolveEllPlacements } from '../domain/ell.js?v=20260917i';
@@ -109,6 +118,7 @@ const GABLE_RAKE_LAP = 0.12;
 const COLOR_HEX = {
  BK: 0x0e0e10,
  AL: 0xf3e6c8,
+ OTG: 0xa8a8a8,
  GAL: 0x8e98a1,
  WH: 0xf7f7f4,
  BR: 0x5a351c,
@@ -342,6 +352,12 @@ export class SceneView {
 
  _buildSimpleGround() {
  const siteGreen = 0x3a6a30;
+ // Site pad + ring sit in their own group so rebuild can slide them under the
+ // building footprint (buildings grow from a corner at siteX/siteZ; the pad
+ // used to stay at the world origin and looked off-center).
+ this._siteGroundGroup = new THREE.Group();
+ this._siteGroundGroup.name = 'siteGround';
+ this.envGroup.add(this._siteGroundGroup);
  const pad = new THREE.Mesh(
  new THREE.CircleGeometry(50, 48),
  new THREE.MeshStandardMaterial({ color: siteGreen, roughness: 0.95 }),
@@ -349,7 +365,7 @@ export class SceneView {
  pad.rotation.x = -Math.PI / 2;
  pad.position.y = -0.035;
  pad.receiveShadow = true;
- this.envGroup.add(pad);
+ this._siteGroundGroup.add(pad);
  const ground = new THREE.Mesh(
  new THREE.RingGeometry(50, 180, 64),
  new THREE.MeshStandardMaterial({
@@ -361,7 +377,42 @@ export class SceneView {
  ground.rotation.x = -Math.PI / 2;
  ground.position.y = -0.04;
  ground.receiveShadow = true;
- this.envGroup.add(ground);
+ this._siteGroundGroup.add(ground);
+ }
+
+ /**
+  * World XZ center of every building + lean-to footprint (feet; FT=1).
+  * Used to keep the mown green pad under the structure for sales shots.
+  */
+ _projectFootprintCenter() {
+ const boxes = this._buildingClearanceBoxes(0);
+ if (!boxes.length) return null;
+ let minX = Infinity;
+ let maxX = -Infinity;
+ let minZ = Infinity;
+ let maxZ = -Infinity;
+ for (const box of boxes) {
+ minX = Math.min(minX, box.minX);
+ maxX = Math.max(maxX, box.maxX);
+ minZ = Math.min(minZ, box.minZ);
+ maxZ = Math.max(maxZ, box.maxZ);
+ }
+ if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return null;
+ return {
+ x: ((minX + maxX) / 2) * FT,
+ z: ((minZ + maxZ) / 2) * FT,
+ };
+ }
+
+ /** Slide the green site pad so its center matches the building footprint. */
+ _syncSitePadToBuildings() {
+ if (!this._siteGroundGroup) return;
+ const c = this._projectFootprintCenter();
+ if (!c) {
+ this._siteGroundGroup.position.set(0, 0, 0);
+ return;
+ }
+ this._siteGroundGroup.position.set(c.x, 0, c.z);
  }
 
  /* ───────────── Environment ───────────── */
@@ -497,6 +548,12 @@ export class SceneView {
  // The pad and the mown band were the same colour and finish, so they are one
  // surface now. Look is unchanged: flat green out to r=95, grass beyond.
 
+ // Pad + outer field share a group so rebuild can center them on the building
+ // (sky / hills stay world-anchored in envGroup).
+ this._siteGroundGroup = new THREE.Group();
+ this._siteGroundGroup.name = 'siteGround';
+ this.envGroup.add(this._siteGroundGroup);
+
  // Outer field — full disc, nothing above it past r=95
  const ground = new THREE.Mesh(
  new THREE.CircleGeometry(200, 128),
@@ -516,7 +573,7 @@ export class SceneView {
  ground.rotation.x = -Math.PI / 2;
  ground.position.y = -0.08;
  ground.receiveShadow = true;
- this.envGroup.add(ground);
+ this._siteGroundGroup.add(ground);
 
  // Mown site pad over it — one flat cap, no internal seam
  const sitePad = new THREE.Mesh(
@@ -531,7 +588,7 @@ export class SceneView {
  sitePad.rotation.x = -Math.PI / 2;
  sitePad.position.y = -0.03;
  sitePad.receiveShadow = true;
- this.envGroup.add(sitePad);
+ this._siteGroundGroup.add(sitePad);
 
  // Distant horizon hills.
  //
@@ -1066,6 +1123,58 @@ export class SceneView {
  }
 
  /**
+   * Soffit material. A vented soffit is perforated metal, so it has to READ as
+   * perforated — same colour as the trim but visibly punched, or the "vented
+   * soffit" the customer is paying for looks identical to the solid one.
+   *
+   * The holes are a generated texture rather than geometry: a soffit run is
+   * hundreds of feet of panel, and punching real holes would cost thousands of
+   * triangles for something only ever seen from below at a distance.
+   */
+ _soffitMat(hex, vented) {
+ const key = `${hex}|${vented ? 'vent' : 'solid'}|${this.lite ? 'lite' : 'full'}`;
+ this._soffitMats = this._soffitMats || new Map();
+ if (this._soffitMats.has(key)) return this._soffitMats.get(key);
+
+ const mat = this._metalMat(hex, {
+ metalness: 0.42,
+ roughness: 0.56,
+ clearcoat: 0.12,
+ envMapIntensity: 0.4,
+ });
+ if (vented && typeof document !== 'undefined') {
+ const S = 64;
+ const cv = document.createElement('canvas');
+ cv.width = cv.height = S;
+ const g = cv.getContext('2d');
+ if (g) {
+ const base = new THREE.Color(this._colorFor(hex, 0xcccccc));
+ g.fillStyle = `rgb(${(base.r * 255) | 0},${(base.g * 255) | 0},${(base.b * 255) | 0})`;
+ g.fillRect(0, 0, S, S);
+ // Perforation rows, staggered, as on a real vented soffit panel.
+ g.fillStyle = 'rgba(0,0,0,0.55)';
+ for (let row = 0; row < 4; row++) {
+ for (let col = 0; col < 8; col++) {
+ const x = col * (S / 8) + (row % 2 ? S / 16 : 0) + S / 16;
+ const y = row * (S / 4) + S / 8;
+ g.beginPath();
+ g.arc(x, y, 1.6, 0, Math.PI * 2);
+ g.fill();
+ }
+ }
+ const tex = new THREE.CanvasTexture(cv);
+ tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+ tex.repeat.set(8, 2);
+ tex.anisotropy = 4;
+ mat.map = tex;
+ mat.needsUpdate = true;
+ }
+ }
+ this._soffitMats.set(key, mat);
+ return mat;
+ }
+
+ /**
    * Vertical rib segments along wall, skipping only the opening rectangle
    * (metal/ribs continue above windows and above doors).
    */
@@ -1323,6 +1432,7 @@ export class SceneView {
  } catch (err) {
  console.warn('Tree layout failed', err);
  }
+ this._syncSitePadToBuildings();
  this._updateSunTarget();
  } catch (err) {
  console.error('Scene rebuild failed', err);
@@ -1846,8 +1956,8 @@ export class SceneView {
  const frameOh = ((b.overhangIn || 0) / 12) * FT;
  const oh = metalOh + frameOh;
 
- const wallHex = this._colorFor(b.wallColor, 0xf2ebe0);
- const roofHex = this._colorFor(b.roofColor, 0x1a1a1a);
+ const wallHex = this._colorFor(partColor(b, 'wallPanel', b.wallColor), 0xf2ebe0);
+ const roofHex = this._colorFor(partColor(b, 'roofPanel', b.roofColor), 0x1a1a1a);
 
  // No solid under-building disc (green lawn / AO circle blocked underside truss views)
 
@@ -2370,7 +2480,7 @@ export class SceneView {
 
  // Full roof-perimeter trim package (matches production 3D: continuous eave,
  // rake on roof edge, corners to eave, ridge). See _addRoofPerimeterTrim.
- this._addRoofPerimeterTrim(group, b, W, L, H, rise, oh, trimHex, this._ellCut(b));
+ this._addRoofPerimeterTrim(group, b, W, L, H, rise, oh, trimHex, this._ellCut(b), wallHex);
 
  // Cross gables sit ON the finished roof, so they go last — their panels and
  // flashing lap over the main roof rather than being lapped by it.
@@ -2571,7 +2681,7 @@ export class SceneView {
    *
    * Roof metal eave is at x=-oh / W+oh, y=H; gable roof edge at z=-oh / L+oh.
    */
- _addRoofPerimeterTrim(group, b, W, L, H, rise, oh, trimHex, cut = null) {
+ _addRoofPerimeterTrim(group, b, W, L, H, rise, oh, trimHex, cut = null, wallHex = null) {
  const mat = this._metalMat(trimHex, {
  metalness: 0.52,
  roughness: 0.44,
@@ -2586,7 +2696,49 @@ export class SceneView {
  const T = 0.13; // thick enough that out - T ≈ 0.01 (laps wall metal)
  const leg = 0.45; // corner leg width on each wall face
  const eaveBandH = 0.36; // vertical depth of top-of-wall / gable wall-face band
- const fasciaH = 0.34; // drip fascia vertical face (eave + gable rake)
+ // Fascia face depth. This used to be a flat 0.34' (4.08") whatever the
+ // building was, which is why a 12" framed overhang drew as a square eave: the
+ // order buys 2x6 sub-fascia wrapped in SANG 1½x5½, so the face is 5½".
+ // js/domain/soffitFascia.js resolves it from the same predicates the takeoff
+ // bills from, and soffit-fascia-check asserts the two agree.
+ const sfSpec = resolveSoffitFascia(b, {
+ framingExtras: includeFullFramingExtras(b),
+ trimFascia: includeFullTrimPackage(b),
+ });
+ const fasciaH = Math.max(0.2, eaveAssemblyFaceFt(sfSpec.eave) || 0.34);
+ // Soffit colour follows what the order bills it in — wallColor — not the trim.
+ // Painting it trim-black while quoting it wall-white is a divergence the
+ // soffit-fascia check now asserts against the takeoff line itself.
+ // Per-piece trim colour. Returns the shared trim material unless the colour
+ // plan says this piece is something else, so a building with no plan builds
+ // exactly the meshes it built before — same material object, even.
+ const partMats = new Map();
+ const partMat = (partId) => {
+ const code = partColor(b, partId, null);
+ if (!code) return mat;
+ const hex = this._colorFor(code, trimHex);
+ if (hex === trimHex) return mat;
+ if (!partMats.has(partId)) {
+ partMats.set(
+ partId,
+ this._metalMat(hex, {
+ metalness: 0.52,
+ roughness: 0.44,
+ clearcoat: 0.22,
+ envMapIntensity: 0.5,
+ }),
+ );
+ }
+ return partMats.get(partId);
+ };
+
+ const soffitHexFor = (runSpec) => {
+ const src = soffitColorSource(runSpec);
+ if (src === 'trim') return trimHex;
+ if (src === 'roof') return this._colorFor(b.roofColor, 0x8a8f94);
+ return wallHex != null ? wallHex : this._colorFor(b.wallColor, 0xf2ebe0);
+ };
+ const rakeFasciaH = Math.max(0.2, eaveAssemblyFaceFt(sfSpec.rake) || 0.34);
  const lipThk = 0.06;
  const nest = 0.018;
  // Eave band / fascia top sits just under roof plane
@@ -2614,7 +2766,7 @@ export class SceneView {
  const lift = 0.08;
  const peakY = H + rise;
  // Slightly smoother/duller than ribbed roof so the cap separates in top-down
- const ridgeMat = this._metalMat(trimHex, {
+ const ridgeMat = this._metalMat(this._colorFor(partColor(b, 'ridgeCap', null) || '', trimHex), {
  metalness: 0.48,
  roughness: 0.48,
  clearcoat: 0.18,
@@ -2679,29 +2831,34 @@ export class SceneView {
  const xDrip = side < 0 ? -oh : W + oh;
  const ox = side < 0 ? -1 : 1;
 
- // Span-aware: keep band/drip/soffit on free wall length; only omit the
- // lean roof span (overlapping main eave band on lean pans was #62).
+ // Span-aware trim:
+ //  - Outer DRIP (fascia above the lean): continuous over every shed lean —
+ //    only ells/gable leans carve it. Carving shed spans left the missing
+ //    section of trim over the lean-to.
+ //  - Wall-face BAND: omit only when lean attach is flush with main eave
+ //    (pans share the plane) or an ell fills the wall.
  const occ = leanOccupiedSpansOnWall(b, wallName);
- const free = mainWallFreeSegments(b, wallName, L);
+ const freeDrip = mainWallFreeSegments(b, wallName, L, { forEaveDrip: true });
+ const freeBand = mainWallFreeSegments(b, wallName, L, { forEaveTrim: true });
  const panDepth = Math.max(oh + out, 0.2);
 
- // Drip fascia segments — skip only where lean pans cover the OH tip.
- const dripSegs = free.map((s) => {
+ // Drip fascia — full eave unless an ell/gable lean occupies the span.
+ const dripSegs = freeDrip.map((s) => {
  let z0 = s.start;
  let z1 = s.end;
  if (s.start <= 0.01) z0 = -oh;
  if (s.end >= L - 0.01) z1 = L + oh;
  return { z0, z1 };
  });
- // No lean at all → one full drip (original language).
- if (!occ.length) {
+ // Nothing carving the drip → one full run (includes shed-lean-only walls).
+ if (!occ.some((s) => s.omitMainEaveDrip)) {
  dripSegs.length = 0;
  dripSegs.push({ z0: -oh, z1: L + oh });
  }
  for (const seg of dripSegs) {
  const len = seg.z1 - seg.z0;
  if (len < 0.12) continue;
- const face = new THREE.Mesh(new THREE.BoxGeometry(T, fasciaH, len + T * 0.5), mat);
+ const face = new THREE.Mesh(new THREE.BoxGeometry(T, fasciaH, len + T * 0.5), partMat('eaveFascia'));
  face.position.set(
  xDrip + ox * (T * 0.35),
  bandTop - fasciaH * 0.5,
@@ -2744,11 +2901,14 @@ export class SceneView {
  if (len < 0.12) continue;
  const pan = new THREE.Mesh(
  new THREE.BoxGeometry(panDepth, lipThk, len + T * 0.5),
- mat,
+ this._soffitMat(soffitHexFor(sfSpec.eave), runIsVented(sfSpec.eave)),
  );
+ // A box eave closes at the BOTTOM of the fascia — that is what makes the
+ // fascia a face you can see rather than a stripe. Keyed to the eave line it
+ // sat flush with the fascia top and the overhang read flat.
  pan.position.set(
  xWall + ox * (out + panDepth * 0.5 - T * 0.25),
- bandTop - lipThk * 0.5,
+ bandTop - fasciaH + lipThk * 0.5,
  (seg.z0 + seg.z1) / 2,
  );
  pan.castShadow = true;
@@ -2757,12 +2917,12 @@ export class SceneView {
  }
 
  // Top-of-wall eave band on OUTER face — free spans only (corner leg insets).
- // Lean span omitted: transition flash + roof lap seal attach without a
- // main band sitting on lean pans (#62).
+ // Flush shed / gable / ell spans omitted so the band does not sit on pans;
+ // stepped shed leans keep the band continuous with the drip above.
  if (!isWallOpen(b, wallName)) {
- const bandSegs = !occ.length
+ const bandSegs = !occ.some((s) => s.omitMainEaveTrim)
  ? [{ start: leg - T * 1.2, end: L - (leg - T * 1.2) }]
- : free.map((s) => {
+ : freeBand.map((s) => {
  let z0 = s.start;
  let z1 = s.end;
  if (s.start <= 0.01) z0 = leg - T * 1.2;
@@ -2774,7 +2934,7 @@ export class SceneView {
  if (len < 0.15) continue;
  const band = new THREE.Mesh(
  new THREE.BoxGeometry(T, eaveBandH, len + TRIM_LAP),
- mat,
+ partMat('topOfWall'),
  );
  band.position.set(outerX(xWall, ox), bandMidY, (s.start + s.end) / 2);
  band.castShadow = true;
@@ -2822,15 +2982,20 @@ export class SceneView {
  // This gable half along the end wall (X): left 0→W/2, right W/2→W
  const halfA = side < 0 ? 0 : W / 2;
  const halfB = side < 0 ? W / 2 : W;
- const halfCoveredByLean = endOcc.some(
- (s) => s.start < halfB - 0.05 && s.end > halfA + 0.05,
+ const halfHits = (key) =>
+ endOcc.some(
+ (s) =>
+ s[key] && s.start < halfB - 0.05 && s.end > halfA + 0.05,
  );
+ // Wall-face band: hide when flush/gable/ell. Outer drip: only gable/ell.
+ const halfCoversBand = halfHits('omitMainEaveTrim');
+ const halfCoversDrip = halfHits('omitMainEaveDrip');
 
  // ── 1) Wall-face rake band (matches eave top-of-wall band) ──
  // Free halves only — lean-span half omitted so band does not sit on lean pans.
  // When an enclosed lean absorbs that corner (L moves to lean outer), run
  // the rake all the way to the building edge or a dark gap appears.
- if (!isWallOpen(b, end.wall) && !halfCoveredByLean) {
+ if (!isWallOpen(b, end.wall) && !halfCoversBand) {
  const absorbed = !!enclosedLeanCoveringCorner(b, {
  eave: side < 0 ? 'left' : 'right',
  gable: end.wall,
@@ -2850,7 +3015,7 @@ export class SceneView {
  // Hang below roof line the same way the eave band hangs below H
  const band = new THREE.Mesh(
  new THREE.BoxGeometry(bandLen, eaveBandH, T),
- mat,
+ partMat('topOfWall'),
  );
  band.position.set(
  (x0 + x1) / 2,
@@ -2863,17 +3028,19 @@ export class SceneView {
  }
 
  // ── 2) Roof-edge drip fascia (matches eave drip fascia size) ──
- // Skip only the half whose OH tip is under lean pans.
- if (!halfCoveredByLean) {
+ // Shed leans keep this drip — it is the trim above the lean.
+ if (!halfCoversDrip) {
+ // The rake is its own run: it can be overridden separately from the eave,
+ // and on a plain building it derives to the same 5½" face.
  const fascia = new THREE.Mesh(
- new THREE.BoxGeometry(dripLen + 0.04, fasciaH, T),
- mat,
+ new THREE.BoxGeometry(dripLen + 0.04, rakeFasciaH, T),
+ partMat('gableFascia'),
  );
  const xD0 = xEaveDrip;
  const xD1 = xRidge;
  fascia.position.set(
  (xD0 + xD1) / 2,
- (yDripAt(xD0) + yDripAt(xD1)) / 2 - fasciaH * 0.42,
+ (yDripAt(xD0) + yDripAt(xD1)) / 2 - rakeFasciaH * 0.42,
  end.zDrip + end.oz * (T * 0.35),
  );
  fascia.rotation.z = angSign * dripAng;
@@ -2889,7 +3056,7 @@ export class SceneView {
  const panDepth = Math.max(oh + out, 0.2);
  const pan = new THREE.Mesh(
  new THREE.BoxGeometry(dripLen * 0.98, lipThk, panDepth),
- mat,
+ this._soffitMat(soffitHexFor(sfSpec.rake), runIsVented(sfSpec.rake)),
  );
  pan.position.set(
  (xEaveDrip + xRidge) / 2,
@@ -2903,7 +3070,7 @@ export class SceneView {
  }
 
  // Peak join — same visual weight as ridge-end on benchmark
- const peak = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.12, T * 1.2), mat);
+ const peak = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.12, T * 1.2), partMat('gableEdge'));
  peak.position.set(
  W / 2,
  H + rise + 0.06,
@@ -2917,7 +3084,7 @@ export class SceneView {
  // Enclosed lean: corners on that wall relocate to the lean OUTER edge and use
  // the lean eave height so metal/trim align with the lean wall top.
  const cornerSites = buildingCornerTrimSites(b);
- const cornerMat = mat.clone();
+ const cornerMat = partMat('corner').clone();
  cornerMat.side = THREE.DoubleSide;
  for (const c of cornerSites) {
  // A lean's own outer corner is listed for the takeoff, but drawn by
@@ -2959,12 +3126,12 @@ export class SceneView {
  mesh.castShadow = true;
  group.add(mesh);
  } else if (eaveClosed) {
- const strip = new THREE.Mesh(new THREE.BoxGeometry(T, siteCornerH, leg), mat);
+ const strip = new THREE.Mesh(new THREE.BoxGeometry(T, siteCornerH, leg), partMat('corner'));
  strip.position.set(cx + c.ox * out, siteMidY, cz + alongEave * (leg * 0.5));
  strip.castShadow = true;
  group.add(strip);
  } else if (gableClosed) {
- const strip = new THREE.Mesh(new THREE.BoxGeometry(leg, siteCornerH, T), mat);
+ const strip = new THREE.Mesh(new THREE.BoxGeometry(leg, siteCornerH, T), partMat('corner'));
  strip.position.set(cx + alongGable * (leg * 0.5), siteMidY, cz + c.oz * out);
  strip.castShadow = true;
  group.add(strip);
@@ -3850,18 +4017,16 @@ export class SceneView {
  deadbolt.rotation.x = Math.PI / 2;
  deadbolt.position.set(w * 0.28, 0.22, 0.3);
  g.add(deadbolt);
- } else if (!framedOnly && (type === 'overhead' || type === 'slider')) {
- const doorCode = String(o.color || '').toUpperCase() === 'BK' ? 'BK' : 'WH';
- const doorCol = selected
- ? 0xc45a20
- : doorCode === 'BK'
- ? 0x111114
- : this._colorFor('WH', 0xf5f5f2);
+ } else if (!framedOnly && type === 'overhead') {
+ const doorCode = String(partColor(b, 'overheadDoor', null) || o.color || 'WH').toUpperCase();
+ const painted = this._colorFor(doorCode, 0xf5f5f2);
+ const isBlack = doorCode === 'BK';
+ const doorCol = selected ? 0xc45a20 : isBlack ? 0x111114 : painted;
  const doorMat = new THREE.MeshStandardMaterial({
  color: doorCol,
- roughness: doorCode === 'BK' ? 0.92 : 0.42,
- metalness: doorCode === 'BK' ? 0 : 0.4,
- envMapIntensity: doorCode === 'BK' ? 0 : 1,
+ roughness: isBlack ? 0.92 : 0.42,
+ metalness: isBlack ? 0 : 0.4,
+ envMapIntensity: isBlack ? 0 : 1,
  });
  const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.985, h * 0.985, 0.14), doorMat);
  door.position.z = 0.14;
@@ -3884,6 +4049,8 @@ export class SceneView {
  );
  hnd.position.set(0, -h * 0.15, 0.26);
  g.add(hnd);
+ } else if (!framedOnly && type === 'slider') {
+ this._addSlidingBarnDoorMeshes(g, b, o, w, h, selected, trimHex);
  } else if (!framedOnly) {
  const fill = new THREE.Mesh(
  new THREE.BoxGeometry(w * 0.9, h * 0.9, 0.1),
@@ -3922,6 +4089,145 @@ export class SceneView {
 
 
  /**
+   * Sliding barn door: metal-matched leaf/leaves + shared top track.
+   * center = two leaves meeting in the middle; left/right = one leaf.
+   * Local coords: X along wall, Y up, +Z outward.
+   */
+ _addSlidingBarnDoorMeshes(g, b, o, w, h, selected, trimHex) {
+ const mode = normalizeSlideMode(o.slideMode, 'slider');
+ const wallHex = selected ? 0xc45a20 : this._colorFor(b.wallColor, 0xf2ebe0);
+ const wainHft = this._wainscotHeightFt(b, Number(o.height) || 10);
+ const hasWain = wainHft > 0.05;
+ const wainHex = selected
+ ? 0xa84a18
+ : this._colorFor(b.wainscotColor || b.trimColor || 'BK', 0x1a1a1a);
+ const trackHex = selected ? 0xf59e0b : trimHex;
+ const leafDepth = 0.12;
+ const gap = 0.04 * FT; // small meeting gap for center
+
+ const wallMat = new THREE.MeshStandardMaterial({
+ color: wallHex,
+ roughness: 0.55,
+ metalness: 0.35,
+ envMapIntensity: 0.85,
+ });
+ const wainMat = new THREE.MeshStandardMaterial({
+ color: wainHex,
+ roughness: 0.62,
+ metalness: 0.28,
+ });
+ const trackMat = new THREE.MeshStandardMaterial({
+ color: trackHex,
+ metalness: 0.65,
+ roughness: 0.32,
+ });
+ const accentMat = new THREE.MeshStandardMaterial({
+ color: 0xf5f5f2,
+ metalness: 0.2,
+ roughness: 0.45,
+ });
+
+ const addLeaf = (leafW, leafX) => {
+ const leaf = new THREE.Group();
+ leaf.position.x = leafX;
+ // Upper wall-color panel
+ const upperH = hasWain ? Math.max(0.2, h - wainHft * FT) : h;
+ const upperY = hasWain ? (-h / 2 + wainHft * FT + upperH / 2) : 0;
+ const upper = new THREE.Mesh(
+ new THREE.BoxGeometry(leafW * 0.995, upperH * 0.995, leafDepth),
+ wallMat,
+ );
+ upper.position.set(0, upperY, 0.16);
+ upper.castShadow = true;
+ leaf.add(upper);
+ if (hasWain) {
+ const bandH = Math.min(wainHft * FT, h) * 0.995;
+ const band = new THREE.Mesh(
+ new THREE.BoxGeometry(leafW * 0.995, bandH, leafDepth + 0.01),
+ wainMat,
+ );
+ band.position.set(0, -h / 2 + bandH / 2, 0.165);
+ band.castShadow = true;
+ leaf.add(band);
+ }
+ // Bottom edge trim (photo: thin light strip)
+ const bot = new THREE.Mesh(
+ new THREE.BoxGeometry(leafW * 0.99, 0.04, leafDepth + 0.02),
+ accentMat,
+ );
+ bot.position.set(0, -h / 2 + 0.02, 0.18);
+ leaf.add(bot);
+ // Subtle vertical ribs
+ const ribMat = new THREE.MeshStandardMaterial({
+ color: new THREE.Color(wallHex).offsetHSL(0, 0, -0.08),
+ roughness: 0.5,
+ metalness: 0.4,
+ });
+ const ribs = 4;
+ for (let i = 1; i < ribs; i++) {
+ const rx = -leafW / 2 + (i / ribs) * leafW;
+ const ribH = hasWain ? Math.max(0.15, h - wainHft * FT) : h * 0.92;
+ const rib = new THREE.Mesh(new THREE.BoxGeometry(0.035, ribH, 0.03), ribMat);
+ rib.position.set(rx, hasWain ? (-h / 2 + wainHft * FT + ribH / 2) : 0, 0.23);
+ leaf.add(rib);
+ }
+ g.add(leaf);
+ };
+
+ if (mode === 'center') {
+ const leafW = (w - gap) / 2;
+ addLeaf(leafW, -leafW / 2 - gap / 2);
+ addLeaf(leafW, leafW / 2 + gap / 2);
+ } else {
+ // Single leaf covering the opening; slight bias toward the slide side.
+ const bias = mode === 'right' ? w * 0.02 : -w * 0.02;
+ addLeaf(w * 0.985, bias);
+ }
+
+ // Shared top track — extends past the RO so leaves can clear.
+ const extend =
+ mode === 'center' ? w * 0.55 : w * 0.95; // ft-space already in mesh units (w is ft*FT)
+ const trackW =
+ mode === 'center' ? w + extend * 2 : w + extend;
+ const trackX =
+ mode === 'center' ? 0 : mode === 'right' ? extend / 2 : -extend / 2;
+ const track = new THREE.Mesh(
+ new THREE.BoxGeometry(trackW, 0.12, 0.18),
+ trackMat,
+ );
+ track.position.set(trackX, h / 2 + 0.14, 0.28);
+ track.castShadow = true;
+ g.add(track);
+ // Track hangers / end stops
+ for (const side of [-1, 1]) {
+ const stop = new THREE.Mesh(
+ new THREE.BoxGeometry(0.1, 0.2, 0.2),
+ trackMat,
+ );
+ stop.position.set(trackX + side * (trackW / 2 - 0.05), h / 2 + 0.08, 0.28);
+ g.add(stop);
+ }
+ // Pull handle(s)
+ const hndMat = new THREE.MeshStandardMaterial({
+ color: 0x222226,
+ metalness: 0.7,
+ roughness: 0.3,
+ });
+ if (mode === 'center') {
+ for (const side of [-1, 1]) {
+ const hnd = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.55, 0.08), hndMat);
+ hnd.position.set(side * (w * 0.08), -h * 0.05, 0.28);
+ g.add(hnd);
+ }
+ } else {
+ const hx = mode === 'right' ? -w * 0.32 : w * 0.32;
+ const hnd = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.55, 0.08), hndMat);
+ hnd.position.set(hx, -h * 0.05, 0.28);
+ g.add(hnd);
+ }
+ }
+
+  /**
    * Center of opening on exterior of wall.
    * Local +Z of the opening group always faces outward.
    * @param {number} outFromWall — how far outside wall face (ft)
@@ -4134,8 +4440,8 @@ export class SceneView {
  const wallThick = 0.16;
  const cornerInset = wallThick; // miter: outer wall stops where end wall thickness starts
  const trimHex = this._colorFor(b.trimColor || b.roofColor || 'BK', 0x2a2a2a);
- const wallHex = this._colorFor(b.wallColor, 0xf2ebe0);
- const roofHex = this._colorFor(b.roofColor, 0x1a1a1a);
+ const wallHex = this._colorFor(partColor(b, 'wallPanel', b.wallColor), 0xf2ebe0);
+ const roofHex = this._colorFor(partColor(b, 'roofPanel', b.roofColor), 0x1a1a1a);
  // Face open flags — needed for wall skins AND gable outer triangle/trim
  const outerOpen = isLeanFaceOpen(lt, 'outer');
  const leftEndOpen = isLeanFaceOpen(lt, 'leftEnd');
@@ -4644,8 +4950,8 @@ export class SceneView {
  worldV0: Math.max(0, Number(lt.offset) || 0),
  },
  );
- // Lean eave trim package (benchmark): vertical drip faces OUTSIDE roof edges,
- // high-edge fascia connects up into main eave.
+ // Lean eave trim package: outer eave + rake drips. High-edge seal is under
+ // the pans only — main eave trim stays on the roofline (no sagging skirt).
  {
  const outNx = (o1x - i1x) / (Math.hypot(o1x - i1x, o1z - i1z) || 1);
  const outNz = (o1z - i1z) / (Math.hypot(o1x - i1x, o1z - i1z) || 1);
@@ -6347,18 +6653,15 @@ export class SceneView {
  }
 
  /**
-   * Lean high-edge hard seal → main building (no daylight under attach).
+   * Lean attach seal → main building (no daylight under attach).
    *
-   * Vertical eave-style fascia on the main wall OUTER face along the lean
-   * attach — NOT a flat/decorative strip on the lean roof pans (#62).
-   * Hangs under the lean high edge and climbs the wall toward the main eave
-   * when broken-pitch leaves a pocket; same-pitch always meets the lean
-   * underside so the #63 mainEaveY cap cannot leave a see-through slit.
+   * No exterior "skirt" from main eave down to the lean — that read as sagging
+   * trim and left a gap in the main roofline. Main eave band/drip now run
+   * continuous over broken-pitch leans; this helper only seals under the lean
+   * high edge (into-wall plug + short under-pan return).
    *
    * Defaults (inches):
-   *   upturnIn  8.0  — cover up main wall toward main eave
-   *   dropIn    7.0  — hang below lean roof plane (opaque skirt)
-   *   lapIn     8.0  — under-roof return into the lean
+   *   lapIn     ~3.5  — short under-roof return (kept under the pans)
    */
  _addLeanTransitionFlash(group, i1, i2, yRoof, _isSideWall, trimHex = 0x2a2a2a, opts = {}) {
  const ax = Number(i1.x) || 0;
@@ -6370,14 +6673,11 @@ export class SceneView {
  const len = Math.hypot(dx, dz);
  if (len < 0.1) return;
 
- // Hard seal: tall/thick enough that looking under the lean high edge
- // cannot see into/under the main building along the full attach span.
- // Free wall eave band/drip stay elsewhere; lean span uses this flash only.
- const upturn = (Number(opts.upturnIn) || 8.0) / 12;
- const drop = (Number(opts.dropIn) || 7.0) / 12;
- const lap = (Number(opts.lapIn) || 8.0) / 12;
+ // Keep the seal under the pans — a long proud return looked like main trim
+ // dropping onto the lean roof.
+ const lap = Math.min((Number(opts.lapIn) || 3.5) / 12, 0.32);
  const inLap = (Number(opts.inLapIn) || 4.0) / 12;
- const T = 0.16; // thicker than eave band so the skirt reads opaque
+ const T = 0.13;
 
  const wall = opts.wall || (_isSideWall ? 'left' : 'front');
  let ox = 0;
@@ -6393,58 +6693,21 @@ export class SceneView {
  clearcoat: 0.22,
  side: THREE.DoubleSide,
  });
- // Yaw keeps local Z along attach (// main wall / main eave) and local Y world-up
- // → vertical drip face (rotated correctly as eave trim, not flat on roof)
  const yaw = Math.atan2(dx, dz);
- // Callers pass building-line attach points (framing package inners).
  const midX = ((ax + bx) / 2) * FT;
  const midZ = ((az + bz) / 2) * FT;
-
- // Same outer plane as main eave band / corner trim (`out` in
- // _addRoofPerimeterTrim). Keying off roof inLap (into the wall) used to
- // bury this face inside the 0.16′ wall metal — invisible from the lean,
- // so the attach read as a daylight gap under the main eave.
  const out = 0.14;
- const faceCenter = out - T * 0.5; // outer face of strip at `out`
 
- // ALWAYS meet/overlap the lean underside first. Same-pitch flush sets
- // roofYIn ≈ mainH + 0.02 while mainEaveY = mainH, so the old
- // min(yRoof+upturn, mainEaveY-0.018) capped the face *below* the pans and
- // left a full-span daylight slit. Broken-pitch (main eave above lean)
- // still climbs into the soffit pocket — without putting a band on pans.
- const mainEaveY = opts.mainEaveY != null ? opts.mainEaveY : yRoof + upturn;
- const meetRoof = yRoof + 0.02; // slight into-plane overlap at wall face only
- const climbTarget = mainEaveY - 0.01;
- const topY =
- climbTarget > meetRoof + 0.03
- ? Math.min(yRoof + upturn, climbTarget)
- : meetRoof;
- const botY = yRoof - drop;
- const faceH = Math.max(0.45, topY - botY);
- const midY = botY + faceH * 0.5;
-
- // Vertical hard closure on OUTER wall plane — full lean attach length
- const face = new THREE.Mesh(new THREE.BoxGeometry(T, faceH, len + TRIM_LAP), mat);
- face.position.set(
- midX + ox * faceCenter,
- midY,
- midZ + oz * faceCenter,
- );
- face.rotation.y = yaw;
- face.castShadow = true;
- face.renderOrder = 2;
- group.add(face);
-
- // Opaque under-roof return into the lean (blocks sight under high edge)
- const retThk = Math.max(T * 0.85, 0.12);
+ // Short under-roof return — centered just outside the wall, tucked under pans
+ const retThk = Math.max(T * 0.75, 0.1);
  const ret = new THREE.Mesh(
  new THREE.BoxGeometry(lap, retThk, len + TRIM_LAP),
  mat,
  );
  ret.position.set(
- midX + ox * (out + lap * 0.5),
- yRoof - retThk * 0.35,
- midZ + oz * (out + lap * 0.5),
+ midX + ox * (out + lap * 0.45),
+ yRoof - retThk * 0.55,
+ midZ + oz * (out + lap * 0.45),
  );
  ret.rotation.y = yaw;
  ret.castShadow = false;
@@ -6458,10 +6721,9 @@ export class SceneView {
  new THREE.BoxGeometry(plugDepth, retThk, len + TRIM_LAP),
  mat,
  );
- // Center sits from just outside building line into the wall under pans
  plug.position.set(
  midX - ox * (plugDepth * 0.5 - 0.04),
- yRoof - retThk * 0.35,
+ yRoof - retThk * 0.55,
  midZ - oz * (plugDepth * 0.5 - 0.04),
  );
  plug.rotation.y = yaw;
@@ -7666,6 +7928,7 @@ export class SceneView {
  height: draft.height,
  sillHeight: draft.sillHeight ?? 0,
  color: draft.color || '',
+ slideMode: draft.slideMode || '',
  host: ud.host || 'main',
  face: ud.face || 'main',
  openWall: !!ud.openWall,

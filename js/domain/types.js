@@ -2,6 +2,8 @@
  * Post-frame domain primitives.
  * Dimensions are feet unless noted. Pitch is rise per 12" run.
  */
+import { normalizeColorPlan } from './colorPlan.js?v=20260920colors1';
+
 
 export const WALLS = ['front', 'back', 'left', 'right'];
 
@@ -151,8 +153,35 @@ export const OPENING_TYPES = {
  walk: { label: 'Walk Door', defaultW: 3, defaultH: 7 },
  window: { label: 'Window', defaultW: 3, defaultH: 4 },
  overhead: { label: 'Garage / Overhead Door', defaultW: 10, defaultH: 10 },
- slider: { label: 'Slider Door', defaultW: 12, defaultH: 8 },
+ slider: { label: 'Sliding Barn Door', defaultW: 12, defaultH: 10 },
 };
+
+/** Slide direction for type === 'slider'. */
+export const SLIDE_MODES = {
+ left: { label: 'Left slide' },
+ right: { label: 'Right slide' },
+ center: { label: 'Center slide (two leaves)' },
+};
+
+export function normalizeSlideMode(raw, type = 'slider') {
+ if (type !== 'slider') return '';
+ const m = String(raw || '').toLowerCase();
+ if (m === 'right' || m === 'center' || m === 'left') return m;
+ return 'left';
+}
+
+/** Track mount for type === 'slider': top-mount vs face-mount brackets + covers. */
+export const SLIDE_MOUNTS = {
+ top: { label: 'Top mount' },
+ face: { label: 'Face mount' },
+};
+
+export function normalizeSlideMount(raw, type = 'slider') {
+ if (type !== 'slider') return '';
+ const m = String(raw || '').toLowerCase();
+ if (m === 'face' || m === 'top') return m;
+ return 'top';
+}
 
 /** 7' walk door height in feet */
 export const WALK_DOOR_7 = 7;
@@ -182,10 +211,116 @@ export const OPENING_PRESETS = [
  { id: 'oh-8x8', type: 'overhead', label: "Garage 8' × 8'", width: 8, height: 8, sillHeight: 0 },
  { id: 'oh-10x10', type: 'overhead', label: "Garage 10' × 10'", width: 10, height: 10, sillHeight: 0 },
  { id: 'oh-12x12', type: 'overhead', label: "Garage 12' × 12'", width: 12, height: 12, sillHeight: 0 },
+ {
+ id: 'slider-12x10-left',
+ type: 'slider',
+ label: "Sliding Barn 12' × 10' — Left",
+ width: 12,
+ height: 10,
+ sillHeight: 0,
+ slideMode: 'left',
+ },
+ {
+ id: 'slider-12x10-right',
+ type: 'slider',
+ label: "Sliding Barn 12' × 10' — Right",
+ width: 12,
+ height: 10,
+ sillHeight: 0,
+ slideMode: 'right',
+ },
+ {
+ id: 'slider-12x10-center',
+ type: 'slider',
+ label: "Sliding Barn 12' × 10' — Center",
+ width: 12,
+ height: 10,
+ sillHeight: 0,
+ slideMode: 'center',
+ },
+ {
+ id: 'slider-10x10-center',
+ type: 'slider',
+ label: "Sliding Barn 10' × 10' — Center",
+ width: 10,
+ height: 10,
+ sillHeight: 0,
+ slideMode: 'center',
+ },
 ];
 
 export function uid(prefix = 'id') {
  return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+/**
+ * Does the stored `offset` run left-to-right along this wall as seen by someone
+ * standing OUTSIDE looking at it?
+ *
+ * The stored offset is a world-axis coordinate: +X on the front and back walls,
+ * +Z on the left and right (scene.js _openingWorldPos). Whether that axis reads
+ * left-to-right depends on which side the viewer stands on, and the answer is
+ * NOT something to derive by hand — an earlier version of this reasoned its way
+ * to the exact opposite table and a check that reasoned the same way agreed with
+ * it, so both were wrong together. The table below is what three.js's own
+ * projection produces when a camera is placed outside each wall and the ends of
+ * that wall are projected to NDC; opening-placement-check.mjs re-runs that
+ * projection rather than re-deriving it.
+ *
+ *   front (outward -Z): offset 0 lands on the viewer's RIGHT  -> mirror
+ *   back  (outward +Z): offset 0 lands on the viewer's LEFT   -> straight
+ *   left  (outward -X): offset 0 lands on the viewer's LEFT   -> straight
+ *   right (outward +X): offset 0 lands on the viewer's RIGHT  -> mirror
+ */
+export function wallOffsetRunsFromLeft(wall) {
+  return wall === 'back' || wall === 'left';
+}
+
+/**
+ * Convert between the stored axis offset and the distance a person would
+ * measure from the left corner as they face the wall.
+ *
+ * Mirroring is its own inverse, so this one function serves both directions —
+ * UI to stored and stored back to UI — and cannot drift out of step with itself.
+ */
+export function mirrorOpeningOffset(wall, wallLenFt, widthFt, offsetFt) {
+  const off = Number(offsetFt) || 0;
+  if (wallOffsetRunsFromLeft(wall)) return off;
+  const len = Number(wallLenFt) || 0;
+  const w = Number(widthFt) || 0;
+  return Math.max(0, len - off - w);
+}
+
+/**
+ * Keep a soffit/fascia override object to the shape the resolver expects.
+ *
+ * Sparse on purpose: a key that is absent means "derive it", so this must not
+ * fill anything in. It only drops what is not a recognised run or field, which
+ * stops a stray key from riding along into saved jobs forever.
+ */
+export function normalizeSoffitFascia(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const RUNS = ['all', 'eave', 'rake', 'lean'];
+  const SOFFIT = ['present', 'material', 'vent', 'depthIn', 'colorSource'];
+  const FASCIA = ['present', 'profile', 'subFascia'];
+  const out = {};
+  for (const run of RUNS) {
+    const r = raw[run];
+    if (!r || typeof r !== 'object') continue;
+    const kept = {};
+    for (const [group, keys] of [['soffit', SOFFIT], ['fascia', FASCIA]]) {
+      const g = r[group];
+      if (!g || typeof g !== 'object') continue;
+      const sub = {};
+      for (const k of keys) {
+        // undefined means "not set"; false and 0 are real choices and stay.
+        if (g[k] !== undefined) sub[k] = g[k];
+      }
+      if (Object.keys(sub).length) kept[group] = sub;
+    }
+    if (Object.keys(kept).length) out[run] = kept;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 export function createOpening(partial = {}) {
@@ -200,13 +335,29 @@ export function createOpening(partial = {}) {
  if (finishColor === 'WHITE' || finishColor === 'AL' || finishColor === 'WH') finishColor = 'WH';
  else if (finishColor === 'BLACK' || finishColor === 'MB' || finishColor === 'BK') finishColor = 'BK';
  else finishColor = colorTypes ? 'WH' : '';
+ const slideMode = normalizeSlideMode(partial.slideMode, type);
+ const slideMount = normalizeSlideMount(partial.slideMount, type);
  return {
  id: partial.id || uid('op'),
  type,
  width: partial.width ?? defaults.defaultW,
  height: partial.height ?? defaults.defaultH,
  wall: partial.wall || 'front',
- /** Offset (ft) along the wall from the left end when facing the wall from outside. */
+ /**
+  * Offset (ft) of the opening's left edge along the wall, measured from the
+  * wall's ORIGIN corner — the +X end for front/back, the +Z end for left/right.
+  *
+  * This is a geometry coordinate, NOT "from the left as you look at the wall".
+  * On the back and left walls the origin corner is on the viewer's RIGHT, so
+  * the two disagree there. Everything that draws or bills from this value
+  * (the wall skin's cutouts, the opening mesh, girts, headers, the plan views)
+  * shares this origin and stays consistent with itself.
+  *
+  * Use mirrorOpeningOffset() to convert to and from what a person standing
+  * outside would call the left corner. That is a UI concern and is applied at
+  * that boundary only — moving the flip into geometry would desync the door
+  * from the hole it sits in.
+  */
  offset: partial.offset ?? 0,
  sillHeight: partial.sillHeight ?? defaultSill,
  /**
@@ -219,6 +370,15 @@ export function createOpening(partial = {}) {
  face: partial.face || 'outer',
  /** Walk / garage / slider / window finish: 'WH' | 'BK' */
  color: colorTypes ? finishColor || 'WH' : '',
+ /**
+   * Sliding barn door only: 'left' | 'right' | 'center'.
+   * Center = two leaves meeting in the middle on a shared top track.
+   */
+ slideMode,
+ /**
+   * Sliding barn door only: 'top' | 'face' track bracket mount (default top).
+   */
+ slideMount,
  /**
    * - 'installed' = include door/window/garage unit (default)
    * - 'framed' = rough opening only (no unit in 3D or takeoff)
@@ -312,12 +472,12 @@ export function createLeanTo(partial = {}) {
  /** Lean post spacing o.c. (ft). Defaults to 10 — independent of main building. */
  postSpacing: partial.postSpacing ?? 10,
  /**
-     * Attachment ledger on the main wall (entire lean length). Standard 2x8;
-     * changeable. 2-ply so lean rafters / purlins seat like a carrier.
+     * Attachment ledger on the main wall (entire lean length). Double-banded
+     * 2x10 (2-ply) so lean rafters / purlins seat like a carrier; changeable.
      */
  ledgerSize: ['2x6', '2x8', '2x10', '2x12'].includes(partial.ledgerSize)
  ? partial.ledgerSize
- : '2x8',
+ : '2x10',
  /**
      * Outer eave rafter bearer (replaces lean sub-fascia). 2-ply on each side of
      * the outer posts — same idea as main truss bearers. Default 2x10.
@@ -459,9 +619,32 @@ export function mainWallHasLean(b, wall) {
 }
 
 /**
+ * True when a shed lean's high edge is flush with the main eave plane (within
+ * ~2.5"). Pitch-number match alone is not enough — a lean can share pitch and
+ * still step down under the soffit when its outer eave is lower; that case
+ * must keep main eave trim continuous over the lean.
+ */
+export function leanAttachFlushWithMainEave(b, lean) {
+  if (!lean) return false;
+  if ((lean.roofStyle || 'shed') === 'gable') return true;
+  const mainH = Number(b?.eaveHeight) || 12;
+  const attach = leanToAttachHeight(b, lean);
+  return Math.abs(attach - mainH) < 0.22;
+}
+
+/**
  * Occupied [start,end) spans (ft along host wall) for leans on `wall`.
  * Merges overlaps. Used to keep main eave band/drip on free wall length and
  * only omit the portion that would sit on lean roof metal.
+ *
+ * `omitMainEaveTrim` — when true, main eave band should not run through this
+ * span (flush shed attach, gable peak on main roof, or an ell). Stepped
+ * (under-soffit) shed leans keep omitMainEaveTrim false so the main roofline
+ * trim stays continuous over the lean.
+ *
+ * `omitMainEaveDrip` — only ells (and gable leans whose pans cover the OH tip).
+ * The outer drip fascia is the "trim above the lean" and must run continuous
+ * for every shed lean, flush or stepped — carving it left a visible gap.
  */
 export function leanOccupiedSpansOnWall(b, wall) {
   const spans = [];
@@ -470,10 +653,17 @@ export function leanOccupiedSpansOnWall(b, wall) {
     const start = Math.max(0, Number(lt.offset) || 0);
     const len = leanToLength(b, lt);
     if (len <= 0.1) continue;
+    const isGable = (lt.roofStyle || 'shed') === 'gable';
+    const pitchMatch = !isGable && leanPitchMatchesMain(b, lt);
+    const flush = leanAttachFlushWithMainEave(b, lt);
     spans.push({
       start,
       end: start + len,
-      pitchMatch: (lt.roofStyle || 'shed') !== 'gable' && leanPitchMatchesMain(b, lt),
+      pitchMatch,
+      omitMainEaveTrim: isGable || flush,
+      // Shed leans never eat the outer drip — only gable (peak on main roof)
+      // or ells do. A flush shed still leaves the OH drip tip exposed.
+      omitMainEaveDrip: isGable,
     });
   }
   // An ell occupies a wall exactly as a lean does: a whole building stands in
@@ -482,7 +672,13 @@ export function leanOccupiedSpansOnWall(b, wall) {
   // domain/ell.js — because the link points from wing to host, not back.
   for (const es of b?._ellSpans || []) {
     if (!es || es.wall !== wall || !(es.lengthFt > 0.1)) continue;
-    spans.push({ start: es.start, end: es.end, pitchMatch: false });
+    spans.push({
+      start: es.start,
+      end: es.end,
+      pitchMatch: false,
+      omitMainEaveTrim: true,
+      omitMainEaveDrip: true,
+    });
   }
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
   const merged = [];
@@ -493,15 +689,29 @@ export function leanOccupiedSpansOnWall(b, wall) {
     } else {
       last.end = Math.max(last.end, s.end);
       last.pitchMatch = !!(last.pitchMatch && s.pitchMatch);
+      last.omitMainEaveTrim = !!(last.omitMainEaveTrim || s.omitMainEaveTrim);
+      last.omitMainEaveDrip = !!(last.omitMainEaveDrip || s.omitMainEaveDrip);
     }
   }
   return merged;
 }
 
-/** Free [start,end) segments of a wall not covered by any lean roof. */
-export function mainWallFreeSegments(b, wall, wallLenFt) {
+/**
+ * Free [start,end) segments of a wall not covered by any lean roof.
+ * @param {{ forEaveTrim?: boolean, forEaveDrip?: boolean }} [opts]
+ *   - `forEaveTrim`: only spans with `omitMainEaveTrim` carve (wall-face band).
+ *   - `forEaveDrip`: only spans with `omitMainEaveDrip` carve (outer fascia).
+ *   Shed leans never carve the drip — that was the missing section over the lean.
+ */
+export function mainWallFreeSegments(b, wall, wallLenFt, opts = {}) {
   const wl = Math.max(0, Number(wallLenFt) || wallLength(b, wall));
-  const occ = leanOccupiedSpansOnWall(b, wall);
+  const forEaveTrim = opts?.forEaveTrim === true;
+  const forEaveDrip = opts?.forEaveDrip === true;
+  const occ = leanOccupiedSpansOnWall(b, wall).filter((s) => {
+    if (forEaveDrip) return !!s.omitMainEaveDrip;
+    if (forEaveTrim) return !!s.omitMainEaveTrim;
+    return true;
+  });
   const free = [];
   let cursor = 0;
   for (const s of occ) {
@@ -823,6 +1033,13 @@ export function createBuilding(partial = {}) {
  /** Structural frame overhang (inches). 0 = square eave; metal may still project. */
  overhangIn: partial.overhangIn ?? 0,
  /**
+     * Explicit soffit and fascia choices, SPARSE — only what the user changed.
+     * Everything absent is derived from the building by js/domain/soffitFascia.js,
+     * so an untouched job resolves exactly as it always did and no existing
+     * quote moves. Shape: { all?, eave?, rake?, lean?: { soffit?, fascia? } }.
+     */
+ soffitFascia: normalizeSoffitFascia(partial.soffitFascia),
+ /**
      * Raised / energy heel above eave (ft). Adds to post ORDER height only
      * (Doug benchmark heel 2′6″ → eave posts cut 22′, peak jambs 26′).
      */
@@ -869,6 +1086,15 @@ export function createBuilding(partial = {}) {
  roofGauge: partial.roofGauge === 26 || partial.roofGauge === '26' ? '26' : '29',
  /** Exterior metal trim color (ridge, eave, corner, base, etc.) */
  trimColor: partial.trimColor || 'BK',
+ /**
+     * Per-piece colour choices, SPARSE. Five slots (roof, trim, walls,
+     * garageDoor, accent1) plus a per-part override for any individual trim
+     * piece. Everything absent inherits, and the slots fall back to the four
+     * legacy colour fields above rather than replacing them, so a job saved
+     * before this existed resolves to exactly the same colours.
+     * Resolved by js/domain/colorPlan.js.
+     */
+ colorPlan: normalizeColorPlan(partial.colorPlan),
  /**
      * Lower wall wainscot color. Empty / 'NONE' = no wainscot.
      * When set, wainscot band height is wainscotHeightFt (0 = off even if color set).
@@ -982,8 +1208,21 @@ export function createProject(partial = {}) {
  laborPerSqFt: partial.laborPerSqFt ?? 0,
  /** Markup % applies to labor only — materials are never marked up. */
  markupPct: partial.markupPct ?? 25,
- /** One-way loaded miles for freight ($4.50/mi + $50 unload). */
+ /** One-way loaded miles for freight ($4.50/mi). */
  freightMiles: partial.freightMiles ?? 0,
+ /** Donkey / unload fee $ (typically 50–75). */
+ freightDonkeyFee: partial.freightDonkeyFee ?? 50,
+ /**
+  * Truck count override. 0 / unset = auto from material weight ÷ maxLbPerTruck.
+  * Manual value ≥ 1 overrides the suggestion.
+  */
+ freightTrucks: partial.freightTrucks ?? 0,
+ /** States passed through for oversize permit ($100 each). */
+ freightPermitStates: partial.freightPermitStates ?? 0,
+ /** Number of freight escorts. */
+ freightEscorts: partial.freightEscorts ?? 0,
+ /** Unit cost per escort ($). */
+ freightEscortRate: partial.freightEscortRate ?? 0,
  /** Sales tax rate % on materials + freight (default 9.5). */
  salesTaxPct: partial.salesTaxPct ?? 9.5,
  buildings,

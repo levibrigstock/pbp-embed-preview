@@ -43,9 +43,9 @@ import {
   PUBLIC_OPENING_FACE_LABELS,
   PUBLIC_LIMITS,
   PUBLIC_SCHEMA_VERSION,
-} from './publicConfig.js?v=20260917s';
+} from './publicConfig.js?v=20260921viewer1';
 
-import { createProject } from '../domain/types.js?v=20260917postPlace';
+import { createProject } from '../domain/types.js?v=20260921freight1';
 
 const $ = (id) => document.getElementById(id);
 
@@ -157,12 +157,14 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260918dougLean3');    // lite: true keeps phone WebGL from OOMing (no shadows / env map / high-performance).
+    const { SceneView } = await import('../render/scene.js?v=20260921viewer1');
+    // Phones stay on the lite WebGL path (no shadows / env map). Desktop gets
+    // the same lighting and metal as the full program.
     scene = new SceneView(canvas, {
-      lite: true,
+      lite: preferLiteViewer(),
       onWallClick: (data) => placeOpeningFromViewer(data),
       onOpeningMove: (data) => dragOpeningFromViewer(data),
-      onOpeningClick: (data) => flashOpeningRow(data?.openingId, false),
+      onOpeningClick: (data) => selectOpeningFromViewer(data?.openingId),
     });
     scene.showFraming = false;
     scene.showMetal = true;
@@ -267,14 +269,28 @@ function bindBuildingControls() {
   });
 }
 
+function preferLiteViewer() {
+  try {
+    const coarse = window.matchMedia?.('(pointer: coarse)')?.matches;
+    const narrow = Math.min(window.innerWidth || 0, window.innerHeight || 0) < 720;
+    const lowMem = typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 2;
+    return !!(lowMem || (coarse && narrow));
+  } catch (_) {
+    return false;
+  }
+}
+
 function bindColorControls() {
   for (const [id, key] of [
     ['wallColor', 'wall'],
     ['roofColor', 'roof'],
     ['trimColor', 'trim'],
     ['wainscotColor', 'wainscot'],
+    ['garageDoorColor', 'garageDoor'],
   ]) {
-    $(id).addEventListener('change', (e) => {
+    const el = $(id);
+    if (!el) continue;
+    el.addEventListener('change', (e) => {
       config.colors[key] = e.target.value;
       if (key === 'wainscot') syncWainscotHeightVisibility();
       commit();
@@ -605,9 +621,50 @@ function bindOpenings() {
 
   $('placeCancel').addEventListener('click', exitViewerEditMode);
   $('moveOpeningToggle').addEventListener('click', toggleMoveMode);
+  $('clearOpeningSelection')?.addEventListener('click', () => {
+    clearOpeningSelection('Opening selection cleared.');
+  });
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && viewerReady() && scene.mode !== 'orbit') exitViewerEditMode();
+    if (e.key !== 'Escape') return;
+    if (viewerReady() && scene.mode !== 'orbit') {
+      exitViewerEditMode();
+      return;
+    }
+    if (scene?.selectedOpeningId) {
+      e.preventDefault();
+      clearOpeningSelection('Opening selection cleared.');
+    }
+  });
+}
+
+/** Drop the 3D highlight (and list outline) on the current opening. */
+function clearOpeningSelection(bannerText) {
+  if (scene) scene.selectedOpeningId = null;
+  document.querySelectorAll('#openingList .list-item').forEach((el) => {
+    el.classList.remove('selected-item');
+  });
+  if (scene?.webglOk) scene.rebuild?.();
+  if (bannerText) showBanner(bannerText, false);
+}
+
+/**
+ * Select (or toggle off) an opening from a 3D click / list tap.
+ * Same pattern as the main app: click again to unselect.
+ */
+function selectOpeningFromViewer(id) {
+  if (!id) return;
+  if (scene?.selectedOpeningId === id) {
+    clearOpeningSelection();
+    return;
+  }
+  if (scene) {
+    scene.selectedOpeningId = id;
+    if (scene.webglOk) scene.rebuild?.();
+  }
+  flashOpeningRow(id, false);
+  document.querySelectorAll('#openingList .list-item').forEach((el) => {
+    el.classList.toggle('selected-item', el.dataset.oid === id);
   });
 }
 
@@ -781,19 +838,22 @@ function flashOpeningRow(id, scroll = true) {
   row.classList.remove('flash');
   void row.offsetWidth; // restart the animation
   row.classList.add('flash');
+  row.classList.add('selected-item');
 }
 
 function renderOpeningList() {
   const host = $('openingList');
   host.innerHTML = '';
+  const selectedId = scene?.selectedOpeningId || null;
   config.openings.forEach((op, i) => {
     const item = el('div', 'list-item');
     item.dataset.oid = op.id;
+    if (selectedId && op.id === selectedId) item.classList.add('selected-item');
     const typeOpts = PUBLIC_OPENING_TYPE_KEYS.map(
       (t) => `<option value="${t}" ${t === op.type ? 'selected' : ''}>${PUBLIC_OPENING_TYPES[t].label}</option>`,
     ).join('');
     item.innerHTML = `
-      <div class="list-head">
+      <div class="list-head" data-select-opening title="Click to select / unselect in 3D">
         <strong>${PUBLIC_OPENING_TYPES[op.type]?.label || 'Opening'} ${i + 1}
           <span class="loc-note">· ${openingLocationLabel(op)}</span></strong>
         <button type="button" class="link" data-remove>Remove</button>
@@ -826,10 +886,21 @@ function renderOpeningList() {
       </div>
     `;
 
-    item.querySelector('[data-remove]').addEventListener('click', () => {
+    item.querySelector('[data-remove]').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const removedId = op.id;
       config.openings.splice(i, 1);
+      if (scene?.selectedOpeningId === removedId) {
+        scene.selectedOpeningId = null;
+      }
       commit();
       renderOpeningList();
+    });
+
+    item.querySelector('[data-select-opening]')?.addEventListener('click', (ev) => {
+      // Don't toggle when the Remove control was the target.
+      if (ev.target.closest('[data-remove]')) return;
+      selectOpeningFromViewer(op.id);
     });
 
     item.querySelector('[data-sel="type"]').addEventListener('change', (e) => {
@@ -910,7 +981,7 @@ function formatBuildingSpecs(publicConfig) {
   const lines = [
     `Size: ${b.width}' W × ${b.length}' L × ${b.eaveHeight}' eave`,
     `Roof: ${b.roofStyle || 'gable'} · ${b.pitch}/12 pitch`,
-    `Colors: wall ${c.wall || '—'} · roof ${c.roof || '—'} · trim ${c.trim || '—'}`,
+    `Colors: wall ${c.wall || '—'} · roof ${c.roof || '—'} · trim ${c.trim || '—'}${c.garageDoor ? ` · garage ${c.garageDoor}` : ''}`,
     `Metal gauge: ${publicConfig?.metalGauge || '—'}`,
   ];
   const concrete = publicConfig?.concrete;
@@ -1449,7 +1520,10 @@ function syncFormFromConfig() {
   setVal('roofColor', config.colors.roof);
   setVal('trimColor', config.colors.trim);
   setVal('wainscotColor', config.colors.wainscot);
-  for (const id of ['wallColor', 'roofColor', 'trimColor', 'wainscotColor']) syncColorUi(id);
+  setVal('garageDoorColor', config.colors.garageDoor || '');
+  for (const id of ['wallColor', 'roofColor', 'trimColor', 'wainscotColor', 'garageDoorColor']) {
+    syncColorUi(id);
+  }
   setVal('wainscotHeight', config.colors.wainscotHeightFt);
   syncWainscotHeightVisibility();
 
@@ -1515,6 +1589,11 @@ function populateColorSelects() {
   $('wainscotColor').innerHTML =
     `<option value="NONE">None</option>` + colorOpts;
   enhanceColorField('wainscotColor', true);
+  const garage = $('garageDoorColor');
+  if (garage) {
+    garage.innerHTML = `<option value="">Auto — each door's own</option>` + colorOpts;
+    enhanceColorField('garageDoorColor', false);
+  }
 }
 
 /** Swatch + chip strip so phone users see real colors, not just names. */
@@ -1566,7 +1645,7 @@ function syncColorUi(selectId) {
   const wrap = sel.closest('.color-field');
   const sw = wrap?.querySelector('.swatch');
   if (sw) {
-    sw.style.background = code === 'NONE'
+    sw.style.background = (code === 'NONE' || code === '')
       ? 'repeating-linear-gradient(45deg,#ccc 0 4px,#eee 4px 8px)'
       : (PUBLIC_COLORS[code]?.hex || '#ccc');
   }

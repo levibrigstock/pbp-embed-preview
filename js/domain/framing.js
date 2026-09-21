@@ -22,7 +22,7 @@ import {
  leanOpenFaceList,
  roundFtToNearestInch,
  isStudFrame,
-} from './types.js?v=20260917postPlace';
+} from './types.js?v=20260921freight1';
 import {
  useFullGirtPackage,
  girtPackMode,
@@ -1104,12 +1104,15 @@ export function computeLeanToMaterials(b, lean, dims) {
  }
  const purlinLf = purlinRows * purlinRunFt;
 
- // --- Attachment ledger at main wall (always) — 2-ply, standard 2x8 ---
+ // --- Attachment ledger at main wall (always) — double-banded 2x10 (2-ply) ---
  const ledgerPlies = 2;
  const ledgerLf = ledgerPlies * length;
- const ledgerSize = ['2x6', '2x8', '2x10', '2x12'].includes(lean.ledgerSize)
+ // Product rule: double-banded 2x10 the lean length. Keep 2x6/2x12 if the
+ // operator picks them; treat missing/legacy 2x8 as 2x10.
+ const ledgerSize =
+ lean.ledgerSize === '2x6' || lean.ledgerSize === '2x12'
  ? lean.ledgerSize
- : '2x8';
+ : '2x10';
 
  // --- Outer eave rafter bearer (always) — 2-ply 2x10 like main truss bearers ---
  // Replaces the old single 2x6 lean sub-fascia line.
@@ -1920,7 +1923,7 @@ export function generateFraming(b) {
  leanLedgerLf += m.ledgerLf || 0;
  leanOuterBearerLf += m.outerBearerLf || 0;
  if ((m.ledgerLf || 0) > 0) {
- const sz = m.ledgerSize || '2x8';
+ const sz = m.ledgerSize || '2x10';
  leanLedgerBySize.set(sz, (leanLedgerBySize.get(sz) || 0) + m.ledgerLf);
  }
  if ((m.outerBearerLf || 0) > 0) {

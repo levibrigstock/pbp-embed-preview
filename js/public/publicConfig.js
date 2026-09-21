@@ -9,7 +9,7 @@
  * carries only what a customer may see and control in a viewer:
  *
  *   - Building envelope (width, length, eave height, pitch, roof style)
- *   - Colors (wall, roof, trim, wainscot)
+ *   - Colors (wall, roof, trim, wainscot, garage door)
  *   - Lean-tos (wall, depth, length, offset, enclosed, pitch, eave height)
  *   - Metal gauge (26 / 29)
  *   - Openings (windows, walk doors, overhead/garage doors) on a main wall
@@ -48,19 +48,21 @@ export const PUBLIC_ROOF_STYLES = ['gable', 'mono'];
  * UI shows the label + a swatch; only the code travels in the payload.
  */
 export const PUBLIC_COLORS = {
-  // First-pass mill-typical hexes paired to Item 13 names (lock to chip photos later).
+  // Keep labels in lockstep with js/domain/colorPlan.js COLOR_CODES and hexes
+  // with js/render/scene.js COLOR_HEX so the chips match the 3D building.
   BK: { label: 'Matte Black', hex: '#0e0e10', item13: 'MATTEBLACK' },
   AL: { label: 'Alamo White', hex: '#f3e6c8', item13: 'ALAMOWHITE' },
-  GAL: { label: 'Galvalume', hex: '#8e98a1', item13: 'GALVALUME' },
-  WH: { label: 'Brilliant White', hex: '#f7f7f4', item13: 'BRILLIANTWHITE' },
+  OTG: { label: 'Ash Gray (OTG)', hex: '#a8a8a8', item13: 'ASHGRAY' },
+  GAL: { label: 'Galvanized', hex: '#8e98a1', item13: 'GALVALUME' },
+  WH: { label: 'White', hex: '#f7f7f4', item13: 'BRILLIANTWHITE' },
   BR: { label: 'Brown', hex: '#5a351c', item13: 'BROWN' },
   TN: { label: 'Tan', hex: '#c9a057', item13: 'TAN' },
-  GR: { label: 'Hunter Green', hex: '#145a2e', item13: 'HUNTERGREEN' },
-  RD: { label: 'Rustic Red', hex: '#9a1f1a', item13: 'RUSTICRED' },
+  GR: { label: 'Evergreen', hex: '#145a2e', item13: 'HUNTERGREEN' },
+  RD: { label: 'Crimson Red', hex: '#9a1f1a', item13: 'RUSTICRED' },
   BU: { label: 'Burgundy', hex: '#6b142e', item13: 'BURGUNDY' },
-  SL: { label: 'Charcoal', hex: '#2a2e34', item13: 'CHARCOAL' },
-  LB: { label: 'Ocean Blue', hex: '#2e6fa8', item13: 'OCEANBLUE' },
-  CG: { label: 'Light Stone', hex: '#d2b48c', item13: 'LIGHTSTONE' },
+  SL: { label: 'Charcoal / Slate', hex: '#2a2e34', item13: 'CHARCOAL' },
+  LB: { label: 'Light Blue', hex: '#2e6fa8', item13: 'OCEANBLUE' },
+  CG: { label: 'Clay / Claystone', hex: '#d2b48c', item13: 'LIGHTSTONE' },
 };
 
 export const PUBLIC_COLOR_CODES = Object.keys(PUBLIC_COLORS);
@@ -167,6 +169,7 @@ export function defaultPublicConfig(companyId = 'demo') {
       trim: 'BK',
       wainscot: 'NONE',
       wainscotHeightFt: 3,
+      garageDoor: '',
     },
     metalGauge: '29',
     leanTos: [],
@@ -304,6 +307,10 @@ export function validatePublicConfig(input) {
   out.colors.wainscot = pickEnumWarn(c.wainscot, PUBLIC_WAINSCOT_CODES, out.colors.wainscot, 'colors.wainscot', warnings);
   // min 0: height 0 = no wainscot band in 3D even if a color is selected
   out.colors.wainscotHeightFt = clampWarn(c.wainscotHeightFt, { min: 0, max: 6 }, out.colors.wainscotHeightFt, 'colors.wainscotHeightFt', warnings);
+  // Empty = leave each overhead door on its own white/black.
+  out.colors.garageDoor = c.garageDoor
+    ? pickEnumWarn(c.garageDoor, PUBLIC_COLOR_CODES, '', 'colors.garageDoor', warnings)
+    : '';
 
   // ── metal gauge ──
   out.metalGauge = pickEnumWarn(
@@ -502,6 +509,7 @@ export function stripSecretsFromConfig(anyConfig) {
           trim: src.trimColor,
           wainscot: src.wainscotColor,
           wainscotHeightFt: src.wainscotHeightFt,
+          garageDoor: src.colorPlan?.slots?.garageDoor || '',
         },
         metalGauge: src.wallGauge ?? src.roofGauge,
         // Wings are separate BUILDINGS, so a single internal building object
@@ -587,6 +595,9 @@ export function publicConfigToBuildingPartial(publicConfig) {
     trimColor: cfg.colors.trim,
     wainscotColor: wainscot,
     wainscotHeightFt: cfg.colors.wainscotHeightFt,
+    colorPlan: cfg.colors.garageDoor
+      ? { slots: { garageDoor: cfg.colors.garageDoor } }
+      : undefined,
 
     wallGauge: cfg.metalGauge,
     roofGauge: cfg.metalGauge,
@@ -671,6 +682,9 @@ export function publicConfigToWingPartials(publicConfig, hostId) {
     trimColor: cfg.colors.trim,
     wainscotColor: wainscot,
     wainscotHeightFt: cfg.colors.wainscotHeightFt,
+    colorPlan: cfg.colors.garageDoor
+      ? { slots: { garageDoor: cfg.colors.garageDoor } }
+      : undefined,
     wallGauge: cfg.metalGauge,
     roofGauge: cfg.metalGauge,
 

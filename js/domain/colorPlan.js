@@ -18,7 +18,7 @@
  * The one rule that governs everything here: a building with no colour plan
  * must resolve to exactly the colours it resolved to before this module
  * existed. The slots fall back to the legacy fields rather than replacing
- * them, so an old job — and all 289 benchmark orders — price unchanged.
+ * them, so an old job — and all 289 PBP shop orders — price unchanged.
  * color-plan-check asserts that line for line against the takeoff.
  */
 

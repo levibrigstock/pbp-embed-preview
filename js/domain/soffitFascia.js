@@ -12,7 +12,7 @@
  * same way the takeoff always has, then lets explicit overrides replace any
  * part of it — the "inherit unless overridden" shape used elsewhere. With no
  * overrides the derivation must reproduce today's billing exactly, because the
- * 289 benchmark assertions are real orders and none of them may move.
+ * 289 PBP matrix assertions are real orders and none of them may move.
  *
  * Dimensions here are not taste. They come from the parts actually on the
  * quote:
@@ -72,20 +72,38 @@ function num(v, d = 0) {
   return Number.isFinite(n) ? n : d;
 }
 
-/** Overhang the metal actually projects, in inches. Mirrors the takeoff. */
-export function metalOverhangIn(b) {
+/** Overhang the metal actually projects, in inches. Mirrors the takeoff.
+ *  `edge`: 'eave' | 'gable' | 'rake' (rake ≡ gable). Default eave for back-compat.
+ */
+export function metalOverhangIn(b, edge = 'eave') {
+  const e = edge === 'gable' || edge === 'rake' ? 'gable' : 'eave';
+  if (e === 'gable') {
+    if (b?.metalOverhangGableIn != null && Number.isFinite(Number(b.metalOverhangGableIn))) {
+      return Math.max(0, Number(b.metalOverhangGableIn));
+    }
+  } else if (b?.metalOverhangEaveIn != null && Number.isFinite(Number(b.metalOverhangEaveIn))) {
+    return Math.max(0, Number(b.metalOverhangEaveIn));
+  }
   const m = num(b?.metalOverhangIn, NaN);
   return Number.isFinite(m) ? Math.max(0, m) : 3;
 }
 
-/** Framed (wood) overhang in inches. */
-export function frameOverhangIn(b) {
+/** Framed (wood) overhang in inches. `edge`: 'eave' | 'gable' | 'rake'. */
+export function frameOverhangIn(b, edge = 'eave') {
+  const e = edge === 'gable' || edge === 'rake' ? 'gable' : 'eave';
+  if (e === 'gable') {
+    if (b?.overhangGableIn != null && Number.isFinite(Number(b.overhangGableIn))) {
+      return Math.max(0, Number(b.overhangGableIn));
+    }
+  } else if (b?.overhangEaveIn != null && Number.isFinite(Number(b.overhangEaveIn))) {
+    return Math.max(0, Number(b.overhangEaveIn));
+  }
   return Math.max(0, num(b?.overhangIn, 0));
 }
 
 /** Total projection past the wall, in inches. */
-export function totalOverhangIn(b) {
-  return frameOverhangIn(b) + metalOverhangIn(b);
+export function totalOverhangIn(b, edge = 'eave') {
+  return frameOverhangIn(b, edge) + metalOverhangIn(b, edge);
 }
 
 /**
@@ -99,10 +117,14 @@ export function eaveProfileMode(b) {
   return frameOverhangIn(b) < 1 && metalOverhangIn(b) <= 3.5 ? 'square' : 'box';
 }
 
-/** Soffit depth in inches: the panel is cut to the overhang less ½". */
-export function soffitDepthIn(b) {
-  if (eaveProfileMode(b) === 'square') return 11.5; // Kane strip
-  return Math.max(2, totalOverhangIn(b) - 0.5);
+/** Soffit depth in inches: the panel is cut to the overhang less ½".
+ *  `edge` selects eave vs gable/rake overhang.
+ */
+export function soffitDepthIn(b, edge = 'eave') {
+  if (edge === 'eave' || edge === undefined) {
+    if (eaveProfileMode(b) === 'square') return 11.5; // yard strip
+  }
+  return Math.max(2, totalOverhangIn(b, edge) - 0.5);
 }
 
 /**
@@ -122,7 +144,7 @@ export function deriveSoffitFascia(b, opts = {}) {
     material: 'steel29',
     // A square eave has always been billed center-vent; a box eave solid.
     vent: square ? 'centerVent' : 'solid',
-    depthIn: soffitDepthIn(b),
+    depthIn: soffitDepthIn(b, 'eave'),
     // Soffit is billed in the WALL colour, not the trim colour — the takeoff
     // has always passed wallColor to the soffit panel lines. The renderer was
     // painting it trim-black, so a white building drew a black soffit and
@@ -135,19 +157,22 @@ export function deriveSoffitFascia(b, opts = {}) {
     subFascia: hasSubFascia ? '2x6' : null,
   };
 
-  const run = () => ({
-    soffit: { ...soffit },
+  const run = (edge = 'eave') => ({
+    soffit: { ...soffit, depthIn: soffitDepthIn(b, edge) },
     fascia: { ...fascia },
   });
 
   return {
     mode,
-    totalOverhangIn: totalOverhangIn(b),
-    frameOverhangIn: frameOverhangIn(b),
-    metalOverhangIn: metalOverhangIn(b),
-    eave: run(),
-    rake: run(),
-    lean: run(),
+    totalOverhangIn: totalOverhangIn(b, 'eave'),
+    frameOverhangIn: frameOverhangIn(b, 'eave'),
+    metalOverhangIn: metalOverhangIn(b, 'eave'),
+    totalOverhangGableIn: totalOverhangIn(b, 'gable'),
+    frameOverhangGableIn: frameOverhangIn(b, 'gable'),
+    metalOverhangGableIn: metalOverhangIn(b, 'gable'),
+    eave: run('eave'),
+    rake: run('gable'),
+    lean: run('eave'),
   };
 }
 
@@ -175,7 +200,7 @@ function applyRunOverride(base, over) {
  *
  * Overrides live on `b.soffitFascia` and are SPARSE — only what was changed.
  * A building with no overrides must resolve identically to deriveSoffitFascia,
- * which is what keeps every existing job and benchmark exactly where it is.
+ * which is what keeps every existing job and PBP matrix exactly where it is.
  */
 export function resolveSoffitFascia(b, opts = {}) {
   const base = deriveSoffitFascia(b, opts);

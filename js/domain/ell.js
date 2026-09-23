@@ -434,6 +434,11 @@ export function stampEllSpans(buildings = []) {
       start: pl.alongStart,
       end: pl.alongEnd,
       lengthFt: pl.alongFt,
+      outFt: pl.outFt,
+      width: num(wing.width, pl.alongFt),
+      length: num(wing.length, pl.outFt),
+      eaveHeight: num(wing.eaveHeight, 12),
+      pitch: num(wing.pitch, 4),
       wingId: wing.id,
     });
   }

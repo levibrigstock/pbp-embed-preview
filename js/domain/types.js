@@ -2,7 +2,7 @@
  * Post-frame domain primitives.
  * Dimensions are feet unless noted. Pitch is rise per 12" run.
  */
-import { normalizeColorPlan } from './colorPlan.js?v=20260920colors1';
+import { normalizeColorPlan } from './colorPlan.js?v=20260923frameView1';
 
 
 export const WALLS = ['front', 'back', 'left', 'right'];
@@ -81,6 +81,17 @@ export function syncSidewallMetalFromOpenWalls(b) {
  b.sidewallMetal = !(open.includes('left') && open.includes('right'));
 }
 
+
+/** Job-level: include exterior roof metal (panels + roof-skin trim). Default on. */
+export function buildingIncludesRoofMetal(b) {
+  return !b || b.includeRoofMetal !== false;
+}
+
+/** Job-level: include exterior wall metal (panels + wall-skin trim). Default on. */
+export function buildingIncludesWallMetal(b) {
+  return !b || b.includeWallMetal !== false;
+}
+
 /** Lean-to wall faces that can be opened (drive-through) on an enclosed lean. */
 export const LEAN_FACES = ['outer', 'leftEnd', 'rightEnd'];
 
@@ -92,11 +103,13 @@ export const LEAN_FACE_LABELS = {
 
 /**
  * Faces with no wall metal / girts / mid-posts.
+ * Cantilever (roof-only): all faces open — no walls, no posts.
  * Open (carport) leans: outer eave is open; END walls still get metal
  * (the white rake/side panels in sales photos). Enclosed leans use openFaces.
  */
 export function leanOpenFaceList(lean) {
  if (!lean) return [];
+ if (isLeanCantilever(lean)) return [...LEAN_FACES];
  if (!isLeanEnclosed(lean)) return ['outer'];
  const raw = Array.isArray(lean.openFaces) ? lean.openFaces : [];
  return LEAN_FACES.filter((f) => raw.includes(f));
@@ -143,6 +156,10 @@ export function createCrossGable(partial = {}) {
       partial.eaveHeight == null || partial.eaveHeight === ''
         ? null
         : Number(partial.eaveHeight),
+    /** Post protector sleeves on standing entry-gable posts (projection > 0). */
+    postProtectors: partial.postProtectors ?? false,
+    /** Perma-Column piers on standing entry-gable posts (projection > 0). */
+    permaColumns: partial.permaColumns ?? false,
   };
 }
 
@@ -407,7 +424,8 @@ export function formatOpeningSize(w, h) {
  *
  * Dimensions: depth = out from wall, length = along wall (0 = full wall).
  * Enclosure: enclosed = wall metal + girts on outer + both ends;
- *            open = carport style — outer eave open, END walls still metalled.
+ *            open = carport style — outer eave open, END walls still metalled;
+ *            cantilever = roof-only canopy — no walls, no lean posts.
  */
 /** Round feet to nearest 1" (production cut heights: 11'4" not 11.3'). */
 export function roundFtToNearestInch(ft) {
@@ -416,34 +434,80 @@ export function roundFtToNearestInch(ft) {
   return Math.round(n * 12) / 12;
 }
 
+/** Interior liner flags: only an explicit yes turns the product on. */
+export function yesLinerFlag(v) {
+  return v === true || v === 'yes' ? 'yes' : 'none';
+}
+
 export function createLeanTo(partial = {}) {
 
- const resolvedKind =
+ const WRAP_CORNERS = ['FL', 'FR', 'BL', 'BR'];
+ const WRAP_CORNER_WALLS = {
+ FL: ['front', 'left'],
+ FR: ['front', 'right'],
+ BL: ['back', 'left'],
+ BR: ['back', 'right'],
+ };
+ let resolvedKind =
  partial.kind ||
  (partial.roofStyle === 'gable' ? 'gable-extension' : 'leanto');
- const roofStyle =
- partial.roofStyle ||
+ if (resolvedKind === 'wrap-lean') resolvedKind = 'wrap';
+ const isWrap = resolvedKind === 'wrap';
+ const wrapCorner = WRAP_CORNERS.includes(String(partial.corner || '').toUpperCase())
+ ? String(partial.corner).toUpperCase()
+ : 'FL';
+ // Primary wall for legacy callers: first wall of the corner pair
+ const wrapWalls = WRAP_CORNER_WALLS[wrapCorner];
+ const roofStyle = isWrap
+ ? 'shed'
+ : partial.roofStyle ||
  (resolvedKind === 'gable-extension' ? 'gable' : 'shed');
- // Default enclosed (walls). Accept enclosed bool or enclosure: 'open'|'enclosed'
+ // Default enclosed (walls). Accept enclosed bool, support, or enclosure:
+ // 'open' | 'enclosed' | 'cantilever'
  let enclosed = true;
- if (typeof partial.enclosed === 'boolean') enclosed = partial.enclosed;
- else if (partial.enclosure === 'open') enclosed = false;
- else if (partial.enclosure === 'enclosed') enclosed = true;
- // Ceiling liner: none | yes (double-bubble / liner under lean roof)
- let ceilingLiner = 'none';
- if (partial.ceilingLiner === true || partial.ceilingLiner === 'yes') ceilingLiner = 'yes';
- else if (partial.ceilingLiner === false || partial.ceilingLiner === 'none') ceilingLiner = 'none';
- else if (partial.ceilingLiner) ceilingLiner = String(partial.ceilingLiner);
+ let support = partial.support === 'cantilever' ? 'cantilever' : 'posts';
+ if (
+   partial.support === 'cantilever' ||
+   partial.cantilever === true ||
+   partial.enclosure === 'cantilever'
+ ) {
+   enclosed = false;
+   support = 'cantilever';
+ } else if (typeof partial.enclosed === 'boolean') {
+   enclosed = partial.enclosed;
+ } else if (partial.enclosure === 'open') {
+   enclosed = false;
+ } else if (partial.enclosure === 'enclosed') {
+   enclosed = true;
+ }
+ if (support === 'cantilever') enclosed = false;
+ // Ceiling / wall liner: none | yes
+ const ceilingLiner = yesLinerFlag(partial.ceilingLiner);
+ const wallLiner = yesLinerFlag(partial.wallLiner);
  return {
  id: partial.id || uid('lt'),
  name:
  partial.name ||
- (resolvedKind === 'gable-extension' ? 'Gable extension' : 'Lean-to'),
- /** 'leanto' | 'gable-extension' */
- kind: resolvedKind,
+ (isWrap
+ ? 'Wrap-around lean-to'
+ : resolvedKind === 'gable-extension'
+ ? 'Gable extension'
+ : 'Lean-to'),
+ /** 'leanto' | 'gable-extension' | 'wrap' */
+ kind: isWrap ? 'wrap' : resolvedKind,
  /** 'shed' (mono) | 'gable' */
  roofStyle: roofStyle === 'gable' ? 'gable' : 'shed',
  wall: partial.wall || 'left',
+ /**
+     * Rafter spacing on a shed lean (ft): 2, 4 or 5.
+     *
+     * Shed leans frame with rafters — end rafters at each end and the rest on
+     * centre. A GABLE EXTENSION does not: that is a wing and it frames with
+     * trusses, so this is ignored there.
+     */
+ rafterSpacing: [2, 4, 5].includes(Number(partial.rafterSpacing))
+ ? Number(partial.rafterSpacing)
+ : 5,
  /** Projection distance from main wall (ft). */
  depth: partial.depth ?? 12,
  /** Length along the wall (ft). 0 = full wall length. */
@@ -471,6 +535,32 @@ export function createLeanTo(partial = {}) {
  pitch: partial.pitch ?? partial._mainPitch ?? 4,
  /** Lean post spacing o.c. (ft). Defaults to 10 — independent of main building. */
  postSpacing: partial.postSpacing ?? 10,
+ /** Post protector sleeves on this lean's posts (independent of main). Ignored for cantilever. */
+ postProtectors: partial.postProtectors ?? false,
+ /** Perma-Column piers on this lean's posts (independent of main). Ignored for cantilever. */
+ permaColumns: partial.permaColumns ?? false,
+ /**
+     * Shed lean: bill joist hangers at the ledger for each rafter station.
+     * When true, lean rafter lumber size follows joistHangerSize (2x8|2x10).
+     * Gable / wrap takeoff ignores this (no shed rafter stations billed).
+     */
+ joistHangers: partial.joistHangers === true,
+ /**
+     * Hanger / rafter size when joistHangers is on. Same JOIST2810 SKU for both;
+     * size still drives rafter lumber and BOM description.
+     */
+ joistHangerSize: ['2x8', '2x10'].includes(partial.joistHangerSize)
+ ? partial.joistHangerSize
+ : '2x8',
+ /**
+     * Optional hanger qty override. null = match shed rafter station count;
+     * a positive integer bills that many JOIST2810 instead.
+     */
+ joistHangerQty: (() => {
+ const n = Number(partial.joistHangerQty);
+ if (Number.isFinite(n) && n > 0) return Math.round(n);
+ return null;
+ })(),
  /**
      * Attachment ledger on the main wall (entire lean length). Double-banded
      * 2x10 (2-ply) so lean rafters / purlins seat like a carrier; changeable.
@@ -495,9 +585,16 @@ export function createLeanTo(partial = {}) {
  snapToPosts: partial.snapToPosts ?? false,
  /**
      * true = wall metal + girts on outer eave + both end walls.
-     * false = open carport — outer eave open; END walls still metalled.
+     * false = open carport — outer eave open; END walls still metalled
+     * (or cantilever roof-only when support === 'cantilever').
      */
  enclosed,
+ /**
+     * 'posts' = outer (and end when enclosed) lean posts carry the roof.
+     * 'cantilever' = roof-only canopy off the main wall — zero lean posts,
+     * no lean wall metal/girts. Implies enclosed=false and all faces open.
+     */
+ support,
  /**
      * Per-face open walls on an enclosed lean (drive-through).
      * Values: 'outer' | 'leftEnd' | 'rightEnd'
@@ -512,9 +609,16 @@ export function createLeanTo(partial = {}) {
  metalOverhangIn: partial.metalOverhangIn ?? 3,
  /**
      * Ceiling liner under lean roof: 'none' | 'yes'
-     * Adds insulation/liner area on takeoff when yes.
+     * Bills interior ceiling panels, FJ, nailers, and liner-color screws.
      */
  ceilingLiner,
+ ceilingLinerColor: String(partial.ceilingLinerColor || 'AR').toUpperCase() || 'AR',
+ /**
+     * Interior wall liner on enclosed (and still-metalled) lean faces.
+     * Bills interior wall panels, base, FJ, J-trim, and liner-color screws.
+     */
+ wallLiner,
+ wallLinerColor: String(partial.wallLinerColor || 'AR').toUpperCase() || 'AR',
  /** Concrete slab under lean footprint (independent of main hasSlab). */
  hasSlab: partial.hasSlab === true,
  /** Slab thickness (in). Defaults to main building slab when omitted. */
@@ -524,14 +628,55 @@ export function createLeanTo(partial = {}) {
  : partial._mainSlabThicknessIn != null
  ? Number(partial._mainSlabThicknessIn) || 4
  : 4,
+ /**
+ * Wrap-around lean (kind === 'wrap'): open porch wrapping a 90° corner.
+ * Enclosed wrap walls are TODO — v1 forces open posts + roof.
+ */
+ ...(isWrap
+ ? {
+ kind: 'wrap',
+ corner: wrapCorner,
+ wall: partial.wall && ['front','back','left','right'].includes(partial.wall)
+ ? partial.wall
+ : wrapWalls[0],
+ walls: wrapWalls,
+ lengthA: Math.max(0, Number(partial.lengthA) || 0),
+ lengthB: Math.max(0, Number(partial.lengthB) || 0),
+ // Open porch v1 — ignore enclosed/cantilever for wrap
+ enclosed: false,
+ support: 'posts',
+ openFaces: ['outer', 'leftEnd', 'rightEnd'],
+ name: partial.name || 'Wrap-around lean-to',
+ }
+ : {}),
  };
 }
 
-/** Whether lean-to has wall skin / girts (not open carport). */
+/**
+ * Roof-only cantilever lean: no walls, no lean posts. Depth still set like a
+ * lean-to; roof metal / rafters / purlins / ledger still bill.
+ */
+export function isLeanCantilever(lean) {
+ if (!lean) return false;
+ if (lean.support === 'cantilever') return true;
+ if (lean.cantilever === true) return true;
+ if (lean.enclosure === 'cantilever') return true;
+ return false;
+}
+
+/** Whether lean-to has wall skin / girts (not open carport / cantilever). */
 export function isLeanEnclosed(lean) {
  if (!lean) return true;
+ if (isLeanCantilever(lean)) return false;
  if (typeof lean.enclosed === 'boolean') return lean.enclosed;
- return lean.enclosure !== 'open';
+ return lean.enclosure !== 'open' && lean.enclosure !== 'cantilever';
+}
+
+/** Operator-facing enclosure label: Enclosed | Open | Cantilever. */
+export function leanEnclosureLabel(lean) {
+ if (isLeanCantilever(lean)) return 'Cantilever';
+ if (!isLeanEnclosed(lean)) return 'Open';
+ return 'Enclosed';
 }
 
 /**
@@ -612,10 +757,27 @@ export function mainWallHasMatchingPitchShedLean(b, wall) {
 }
 
 /** True when any lean (open or enclosed) attaches to this main wall. */
+
+function WRAP_CORNER_WALLS_LOCAL(corner) {
+  const m = {
+    FL: ['front', 'left'],
+    FR: ['front', 'right'],
+    BL: ['back', 'left'],
+    BR: ['back', 'right'],
+  };
+  const c = String(corner || 'FL').toUpperCase();
+  return m[c] || m.FL;
+}
+
 export function mainWallHasLean(b, wall) {
-  return (b?.leanTos || []).some(
-    (lt) => lt && lt.wall === wall && (Number(lt.depth) || 0) > 0.1,
-  );
+  return (b?.leanTos || []).some((lt) => {
+    if (!lt || (Number(lt.depth) || 0) <= 0.1) return false;
+    if (lt.kind === 'wrap' || lt.kind === 'wrap-lean') {
+      const walls = lt.walls || WRAP_CORNER_WALLS_LOCAL(lt.corner);
+      return walls.includes(wall);
+    }
+    return lt.wall === wall;
+  });
 }
 
 /**
@@ -649,7 +811,37 @@ export function leanAttachFlushWithMainEave(b, lean) {
 export function leanOccupiedSpansOnWall(b, wall) {
   const spans = [];
   for (const lt of b?.leanTos || []) {
-    if (!lt || lt.wall !== wall || (Number(lt.depth) || 0) <= 0.1) continue;
+    if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
+    // Wrap-around: may occupy this wall as one of two host walls
+    if (lt.kind === 'wrap' || lt.kind === 'wrap-lean') {
+      const walls = lt.walls || WRAP_CORNER_WALLS_LOCAL(lt.corner);
+      if (!walls.includes(wall)) continue;
+      const max = wallLength(b, wall);
+      const isA = walls[0] === wall;
+      const raw = isA ? Number(lt.lengthA) : Number(lt.lengthB);
+      const len = raw > 0 ? Math.min(raw, max) : max;
+      if (len <= 0.1) continue;
+      const corner = String(lt.corner || 'FL').toUpperCase();
+      let start = 0;
+      if (wall === 'front' || wall === 'back') {
+        if (corner === 'FR' || corner === 'BR') start = Math.max(0, max - len);
+      } else if (corner === 'BL' || corner === 'BR') {
+        start = Math.max(0, max - len);
+      }
+      const isGable = false;
+      const pitchMatch = leanPitchMatchesMain(b, lt);
+      const flush = leanAttachFlushWithMainEave(b, lt);
+      spans.push({
+        start,
+        end: Math.min(max, start + len),
+        leanId: lt.id,
+        omitMainEaveTrim: pitchMatch && flush,
+        omitMainEaveDrip: false,
+        isGable,
+      });
+      continue;
+    }
+    if (lt.wall !== wall) continue;
     const start = Math.max(0, Number(lt.offset) || 0);
     const len = leanToLength(b, lt);
     if (len <= 0.1) continue;
@@ -681,16 +873,21 @@ export function leanOccupiedSpansOnWall(b, wall) {
     });
   }
   spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  // Do not coalesce abutting lean + ell spans when their omit flags differ.
+  // OR-ing omitMainEaveDrip across a lean↔wing junction used to carve the
+  // host drip (and band) over the lean span as if it were an ell.
   const merged = [];
   for (const s of spans) {
     const last = merged[merged.length - 1];
-    if (!last || s.start > last.end + 0.05) {
+    const sameOmit =
+      last &&
+      !!last.omitMainEaveTrim === !!s.omitMainEaveTrim &&
+      !!last.omitMainEaveDrip === !!s.omitMainEaveDrip;
+    if (!last || s.start > last.end + 0.05 || !sameOmit) {
       merged.push({ ...s });
     } else {
       last.end = Math.max(last.end, s.end);
       last.pitchMatch = !!(last.pitchMatch && s.pitchMatch);
-      last.omitMainEaveTrim = !!(last.omitMainEaveTrim || s.omitMainEaveTrim);
-      last.omitMainEaveDrip = !!(last.omitMainEaveDrip || s.omitMainEaveDrip);
     }
   }
   return merged;
@@ -774,6 +971,14 @@ export function attachmentRidgeRise(att) {
 
 /** Effective lean-to length along host wall. */
 export function leanToLength(b, lean) {
+ if (lean && (lean.kind === 'wrap' || lean.kind === 'wrap-lean')) {
+ // Sum of both legs along walls (for rough stats); openings use face-specific.
+ const wa = wallLength(b, (lean.walls && lean.walls[0]) || lean.wall || 'front');
+ const wb = wallLength(b, (lean.walls && lean.walls[1]) || 'left');
+ const la = Number(lean.lengthA) > 0 ? Math.min(Number(lean.lengthA), wa) : wa;
+ const lb = Number(lean.lengthB) > 0 ? Math.min(Number(lean.lengthB), wb) : wb;
+ return la + lb;
+ }
  const wl = wallLength(b, lean.wall);
  if (lean.length > 0) return Math.min(lean.length, Math.max(0, wl - lean.offset));
  return Math.max(0, wl - lean.offset);
@@ -807,6 +1012,24 @@ export function postPartId(x, z, scope = 'main') {
 /** Stable wall metal panel id from wall-local u/v rect (ft). */
 export function wallPanelPartId(wall, u0, u1, v0, v1) {
  return `wall-panel:${wall}:u${roundPartFt(u0)}-${roundPartFt(u1)}:v${roundPartFt(v0)}-${roundPartFt(v1)}`;
+}
+
+/**
+ * Production / Edit-parts id for a ~3′ wall sheathing bay band.
+ * Matches getSheathingLayout + 2D Edit: sheathing:{wall}:{i}:{band}
+ * where band is full | upper | wainscot | peak.
+ */
+export function sheathingWallPartId(wall, bayIndex, band = 'full') {
+ const i = Math.max(1, Math.round(Number(bayIndex) || 1));
+ const b = String(band || 'full').toLowerCase();
+ return `sheathing:${wall}:${i}:${b}`;
+}
+
+/** 1-based bay index for a wall-local U span (3′ coverage), matching getSheathingLayout. */
+export function sheathingBayIndex(u0, u1, coverageFt = 3) {
+ const cov = Math.max(0.01, Number(coverageFt) || 3);
+ const mid = (Number(u0) + Number(u1)) / 2;
+ return Math.max(1, Math.floor(mid / cov) + 1);
 }
 
 /** Normalize partOverrides map from saved JSON. */
@@ -993,24 +1216,36 @@ export function createBuilding(partial = {}) {
  girtSize: ['2x4', '2x6', '2x8'].includes(partial.girtSize)
  ? partial.girtSize
  : '2x6',
- /** Roof purlin lumber: '2x4' | '2x6' | '2x8'. Default 2x4; Kane/benchmark often 2x6. */
+ /** Roof purlin lumber: '2x4' | '2x6' | '2x8'. Default 2x4; shop package often 2x6. */
  purlinSize: ['2x4', '2x6', '2x8'].includes(partial.purlinSize)
  ? partial.purlinSize
  : '2x4',
  /** Treated skirt at grade — main building perimeter only (not lean-tos). Default 2x6. */
  skirtSize: partial.skirtSize || '2x6',
  /**
-     * Post protector sleeves on main structure posts only (never lean-tos / awnings).
+     * Post protector sleeves on this building's main posts.
+     * Lean-tos / wings / entry gables have their own flags.
      */
  postProtectors: partial.postProtectors ?? false,
  /**
-     * Perma-Column precast piers on main structure posts only (never lean-tos / awnings).
+     * Perma-Column precast piers on this building's main posts.
+     * Lean-tos / wings / entry gables have their own flags.
      */
  permaColumns: partial.permaColumns ?? false,
  /**
      * @deprecated Prefer openWalls. false = open left+right eaves when openWalls is absent.
      */
  sidewallMetal: partial.sidewallMetal ?? true,
+ /**
+     * Include exterior roof metal (main + lean/wing roof panels + roof-skin trim).
+     * false = omit from 3D/2D skin and takeoff. Default true.
+     */
+ includeRoofMetal: partial.includeRoofMetal !== false,
+ /**
+     * Include exterior wall / sidewall metal (main + lean walls + wall-skin trim).
+     * Independent of openWalls (drive-through). false = omit skin + BOM. Default true.
+     */
+ includeWallMetal: partial.includeWallMetal !== false,
  /**
      * Open Wall (drive-through).
      * List of main walls with no wall metal, no girts, and no intermediate posts
@@ -1030,8 +1265,14 @@ export function createBuilding(partial = {}) {
      * Size 2x10 or 2x12.
      */
  trussCarrierSize: partial.trussCarrierSize || '2x10',
- /** Structural frame overhang (inches). 0 = square eave; metal may still project. */
- overhangIn: partial.overhangIn ?? 0,
+ /**
+     * Independent framed overhangs (inches). Eave = left/right (slope);
+     * gable = front/back (rake / fly). Legacy `overhangIn` migrates to both.
+     */
+ overhangEaveIn: partial.overhangEaveIn ?? partial.overhangIn ?? 0,
+ overhangGableIn: partial.overhangGableIn ?? partial.overhangIn ?? 0,
+ /** @deprecated convenience — equals overhangEaveIn for back-compat callers. */
+ overhangIn: partial.overhangEaveIn ?? partial.overhangIn ?? 0,
  /**
      * Explicit soffit and fascia choices, SPARSE — only what the user changed.
      * Everything absent is derived from the building by js/domain/soffitFascia.js,
@@ -1041,26 +1282,32 @@ export function createBuilding(partial = {}) {
  soffitFascia: normalizeSoffitFascia(partial.soffitFascia),
  /**
      * Raised / energy heel above eave (ft). Adds to post ORDER height only
-     * (Doug benchmark heel 2′6″ → eave posts cut 22′, peak jambs 26′).
+     * (Doug PBP matrix heel 2′6″ → eave posts cut 22′, peak jambs 26′).
      */
  heelHeightFt: Math.max(0, Number(partial.heelHeightFt) || 0),
  /**
      * Main-building ceiling liner (Arctic / Thrifty panels + FJ). 'yes' | 'none'.
-     * Jim benchmark: FJ Arctic ×30 + wall FJ Black ×31.
+     * Jim PBP matrix: FJ Arctic ×30 + wall FJ Black ×31.
      */
- ceilingLiner:
-  partial.ceilingLiner === true || partial.ceilingLiner === 'yes'
-   ? 'yes'
-   : 'none',
+ ceilingLiner: yesLinerFlag(partial.ceilingLiner),
  /** Trim/panel color for ceiling liner FJ (default AR = Arctic). */
- ceilingLinerColor: partial.ceilingLinerColor || 'AR',
+ ceilingLinerColor: String(partial.ceilingLinerColor || 'AR').toUpperCase() || 'AR',
  /**
-     * Roof panel only overhang past framing (inches). Standard We Build: 3".
-     * Used for roof panel length & purlin row count, not post layout.
+     * Interior wall liner on closed walls. 'yes' | 'none'.
+     * Panels from the floor to the roof line, plus base, FJ, J-trim, screws.
      */
- metalOverhangIn: partial.metalOverhangIn ?? 3,
+ wallLiner: yesLinerFlag(partial.wallLiner),
+ wallLinerColor: String(partial.wallLinerColor || 'AR').toUpperCase() || 'AR',
  /**
-     * Always 'auto' in the app — benchmark package from geometry (eave ≥ 14′ or lean → full).
+     * Metal-only overhang past framing (inches). Split eave/gable; legacy
+     * `metalOverhangIn` migrates to both. Standard We Build: 3".
+     */
+ metalOverhangEaveIn: partial.metalOverhangEaveIn ?? partial.metalOverhangIn ?? 3,
+ metalOverhangGableIn: partial.metalOverhangGableIn ?? partial.metalOverhangIn ?? 3,
+ /** @deprecated convenience — equals metalOverhangEaveIn. */
+ metalOverhangIn: partial.metalOverhangEaveIn ?? partial.metalOverhangIn ?? 3,
+ /**
+     * Always 'auto' in the app — PBP matrix package from geometry (eave ≥ 14′ or lean → full).
      * 'small' | 'full' only for internal regression tests.
      */
  orderPackageMode: ['auto', 'small', 'full'].includes(partial.orderPackageMode)
@@ -1069,7 +1316,7 @@ export function createBuilding(partial = {}) {
  /**
      * Mid-gable post stock when required is ~18.1–18.5′:
      * 'auto' | 'demote18' | 'keep20'. Default auto (width/lean + package rule).
-     * Frank benchmark 35×50 uses keep20 so mid-gable orders 20′ without breaking
+     * Frank PBP matrix 35×50 uses keep20 so mid-gable orders 20′ without breaking
      * 30×40 / 40×40 / 35×55 auto demotion goldens.
      */
  midGablePostPolicy: ['auto', 'demote18', 'keep20'].includes(partial.midGablePostPolicy)
@@ -1078,7 +1325,7 @@ export function createBuilding(partial = {}) {
  wallColor: partial.wallColor || 'AL',
  roofColor: partial.roofColor || 'BK',
  /**
-     * Metal panel gauge for walls / roof. benchmark & Kane item lists use 29 GA default
+     * Metal panel gauge for walls / roof. PBP matrix & yard catalogs use 29 GA default
      * or 26 GA upgrade (e.g. 2640BKQLP / 26GLIFE-MATTEBLACK).
      * Values: '29' | '26'
      */
@@ -1108,15 +1355,41 @@ export function createBuilding(partial = {}) {
  /**
      * Insulation product when location ≠ none:
      * 'fiberglass3' | 'thermaguard' | 'both' (double: fiberglass + ThermaGuard)
+     * | 'housewrap' (10'x150' house wrap rolls)
      */
  insulationType:
  partial.insulationType === 'thermaguard' ||
  partial.insulationType === 'both' ||
- partial.insulationType === 'double'
+ partial.insulationType === 'double' ||
+ partial.insulationType === 'housewrap'
  ? partial.insulationType === 'double'
  ? 'both'
  : partial.insulationType
  : 'fiberglass3',
+ /**
+     * OSB sheathing location: 'none' | 'roof' | 'walls' | 'both'
+     *
+     * Sheathing goes UNDER the metal, it does not replace it: the panels, screws
+     * and trim are unchanged and the OSB is an added layer over the purlins and
+     * girts. A job that wants OSB instead of metal is a different build and is
+     * not what this option does.
+     */
+ osb: ['roof', 'walls', 'both'].includes(partial.osb) ? partial.osb : 'none',
+ /** Panel thickness when osb !== none. */
+ osbThickness: ['7/16', '1/2', '5/8'].includes(partial.osbThickness)
+ ? partial.osbThickness
+ : '7/16',
+ /**
+     * Which face of the frame the sheathing lands on: 'outside' | 'inside'.
+     *
+     * Outside is the exterior face of the posts and girts, with the metal over
+     * it — the usual structural sheathing. Inside is the interior face, a solid
+     * surface inside the shop, still with the metal on the outside of the frame.
+     * It changes nothing about how much OSB a wall takes and everything about
+     * where the crew hangs it, which is why it rides on the line rather than in
+     * the quantity.
+     */
+ osbSide: partial.osbSide === 'inside' ? 'inside' : 'outside',
  hasSlab: partial.hasSlab ?? false,
  slabThicknessIn: partial.slabThicknessIn ?? 4,
  /**
@@ -1253,20 +1526,81 @@ export function roofRise(b) {
  return (b.width / 2) * (b.pitch / 12);
 }
 
-/** Structural + metal overhang in feet (panel projection). */
-export function totalRoofOverhangFt(b) {
- return ((b.overhangIn || 0) + (b.metalOverhangIn ?? 3)) / 12;
+/** Non-negative inch helper. */
+function inchesOr(v, fallback = 0) {
+ const n = Number(v);
+ return Number.isFinite(n) ? Math.max(0, n) : fallback;
 }
 
-/** One-side rafter / roof-panel length including metal overhang (ft). */
+/**
+ * Framed (wood) eave overhang in inches.
+ * Migrates legacy `overhangIn` when `overhangEaveIn` is absent.
+ * Eave = left/right for gable (and mono high/low); drives rafter / slope run.
+ */
+export function frameOverhangEaveIn(b) {
+ if (b?.overhangEaveIn != null && Number.isFinite(Number(b.overhangEaveIn))) {
+  return inchesOr(b.overhangEaveIn, 0);
+ }
+ return inchesOr(b?.overhangIn, 0);
+}
+
+/**
+ * Framed (wood) gable / rake overhang in inches.
+ * Migrates legacy `overhangIn` when `overhangGableIn` is absent.
+ * Gable = front/back; drives fly rafters / roof length past gable ends.
+ */
+export function frameOverhangGableIn(b) {
+ if (b?.overhangGableIn != null && Number.isFinite(Number(b.overhangGableIn))) {
+  return inchesOr(b.overhangGableIn, 0);
+ }
+ return inchesOr(b?.overhangIn, 0);
+}
+
+/** Metal-only eave overhang inches (default 3″). */
+export function metalOverhangEaveIn(b) {
+ if (b?.metalOverhangEaveIn != null && Number.isFinite(Number(b.metalOverhangEaveIn))) {
+  return inchesOr(b.metalOverhangEaveIn, 3);
+ }
+ const m = Number(b?.metalOverhangIn);
+ return Number.isFinite(m) ? Math.max(0, m) : 3;
+}
+
+/** Metal-only gable / rake overhang inches (default 3″). */
+export function metalOverhangGableIn(b) {
+ if (b?.metalOverhangGableIn != null && Number.isFinite(Number(b.metalOverhangGableIn))) {
+  return inchesOr(b.metalOverhangGableIn, 3);
+ }
+ const m = Number(b?.metalOverhangIn);
+ return Number.isFinite(m) ? Math.max(0, m) : 3;
+}
+
+/** Eave total (frame + metal) overhang in feet — slope / rafter projection. */
+export function totalEaveOverhangFt(b) {
+ return (frameOverhangEaveIn(b) + metalOverhangEaveIn(b)) / 12;
+}
+
+/** Gable / rake total (frame + metal) overhang in feet — along building length. */
+export function totalGableOverhangFt(b) {
+ return (frameOverhangGableIn(b) + metalOverhangGableIn(b)) / 12;
+}
+
+/**
+ * Structural + metal overhang in feet (panel projection on the eave / slope).
+ * Alias of totalEaveOverhangFt for back-compat callers.
+ */
+export function totalRoofOverhangFt(b) {
+ return totalEaveOverhangFt(b);
+}
+
+/** One-side rafter / roof-panel length including eave metal overhang (ft). */
 export function rafterLength(b) {
- const oh = totalRoofOverhangFt(b);
+ const oh = totalEaveOverhangFt(b);
  if (b.roofStyle === 'mono') {
  const run = b.width + oh;
  const rise = b.width * (b.pitch / 12);
  return Math.hypot(run, rise);
  }
- // Gable: half-span run + oh, rise on the building half-width (pitch on frame)
+ // Gable: half-span run + eave oh, rise on the building half-width (pitch on frame)
  const half = b.width / 2;
  const run = half + oh;
  const rise = half * (b.pitch / 12);
@@ -1274,10 +1608,12 @@ export function rafterLength(b) {
 }
 
 export function roofAreaSqFt(b) {
- const oh = (b.overhangIn || 0) / 12;
+ const ohEave = frameOverhangEaveIn(b) / 12;
+ const ohGable = frameOverhangGableIn(b) / 12;
  const rafter = rafterLength(b);
- if (b.roofStyle === 'mono') return rafter * (b.length + 2 * oh);
- return 2 * rafter * (b.length + 2 * oh);
+ // Length extension is gable OH (front/back); slope already includes eave OH.
+ if (b.roofStyle === 'mono') return rafter * (b.length + 2 * ohGable);
+ return 2 * rafter * (b.length + 2 * ohGable);
 }
 
 export function wallAreaSqFt(b) {

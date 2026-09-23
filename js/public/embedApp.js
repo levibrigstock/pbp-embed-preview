@@ -45,7 +45,7 @@ import {
   PUBLIC_SCHEMA_VERSION,
 } from './publicConfig.js?v=20260921viewer1';
 
-import { createProject } from '../domain/types.js?v=20260921freight1';
+import { createProject } from '../domain/types.js?v=20260923houseWrap1';
 
 const $ = (id) => document.getElementById(id);
 
@@ -157,7 +157,7 @@ async function startViewer() {
     /* non-fatal */
   }
   try {
-    const { SceneView } = await import('../render/scene.js?v=20260921viewer1');
+    const { SceneView } = await import('../render/scene.js?v=20260923houseWrap1');
     // Phones stay on the lite WebGL path (no shadows / env map). Desktop gets
     // the same lighting and metal as the full program.
     scene = new SceneView(canvas, {

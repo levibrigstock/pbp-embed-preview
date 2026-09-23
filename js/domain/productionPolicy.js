@@ -8,19 +8,45 @@
  * Do NOT hardcode job names or screenshot lengths here.
  * Every constant must scale from building inputs.
  *
- * Verified against production order lists:
- *   - 30×40×12 plain 4/12, 3″ metal OH → roof 16′2″, girt 35, purlin 36@16+18@12
- *   - 30×40×16 wood OH (Landon/Pulver) → continuous girt ~44–45, purlin 30@16+38@12 (+lean 12s)
- *   - 55×80×14 + lean 8 + openings, 6″ metal OH → girt 130, purlin 158@16+43@12,
- *     roof 29′11″ / 38′4″
+ * Lengths are not invented here either — anything that is a distance on the
+ * building comes from measure.js, which measures it. This module decides what
+ * stock that distance is bought in.
  */
 
-import { ellBuriedRunOnWall } from './ell.js?v=20260917g';
+import { ellBuriedRunOnWall } from './ell.js?v=20260923frameView1';
+import { measureRoofPlane, frameEaveHeightFt } from './measure.js?v=20260923openOff1';
 
 // ── Metal / panel order ─────────────────────────────────────────────
 
 /** Panel coverage width (ft) — standard rib panel. */
 export const PANEL_COVERAGE_FT = 3;
+
+/**
+ * Split wall-panel solids into ~coverageFt strips along U (last remnant OK).
+ * Used by 3D scene + 2D Edit so wallPanelPartId matches individual ~3' sheets.
+ *
+ * @param {Array<{u0:number,u1:number,v0:number,v1:number}>} panels
+ * @param {number} [coverageFt=PANEL_COVERAGE_FT]
+ * @returns {Array<{u0:number,u1:number,v0:number,v1:number}>}
+ */
+export function slicePanelsByCoverage(panels, coverageFt = PANEL_COVERAGE_FT) {
+  const cov = Math.max(0.01, Number(coverageFt) || PANEL_COVERAGE_FT);
+  const out = [];
+  for (const p of panels || []) {
+    const u0 = Number(p.u0) || 0;
+    const u1 = Number(p.u1) || 0;
+    const v0 = Number(p.v0) || 0;
+    const v1 = Number(p.v1) || 0;
+    if (u1 - u0 < 0.04 || v1 - v0 < 0.04) continue;
+    let u = u0;
+    while (u < u1 - 1e-9) {
+      const next = Math.min(u1, u + cov);
+      if (next - u > 0.04) out.push({ u0: u, u1: next, v0, v1 });
+      u = next;
+    }
+  }
+  return out;
+}
 
 /**
  * Minimum metal projection past eave for ORDER length (inches).
@@ -29,36 +55,33 @@ export const PANEL_COVERAGE_FT = 3;
  */
 export const PANEL_METAL_DRIP_MIN_IN = 3;
 
-/**
- * Extra cut length beyond panel slope (inches), by slope length.
- * Short: small allowance → 30×40 @ 3″ OH → 16′2″.
- * Long: ridge roll + drip → Levi free side 29′11″.
+/*
+ * The roof order-add constants that used to live here (1.5″ / 2″ / 5.5″, banded
+ * by slope length and overhang width) are gone. Each had been fitted to one
+ * job's order list, and together they over-measured a sheet by an inch or two
+ * on sizes none of those jobs covered. A roof sheet is now measured end to end
+ * by measure.js and rounded up to the next inch — see roofPanelCutLengthFt.
  */
-/** Short order-add (inches): 30×40 4/12 @ 3″ OH → 16′2″. */
-export const ROOF_ORDER_ADD_SHORT_IN = 1.5;
-/** Mid order-add (inches): 40×40 4/12 @ 3″ OH → 21′6″ (benchmark). */
-export const ROOF_ORDER_ADD_MID_IN = 2;
-/** Long order-add (inches): Levi free side → 29′11″. */
-export const ROOF_ORDER_ADD_LONG_IN = 5.5;
-/** Slope ≥ this (ft) uses mid add (not short). */
-export const ROOF_ORDER_ADD_MID_AT_FT = 20;
-/**
- * @deprecated Long roof order-add is gated by metal OH ≥ 6″ (not slope).
- * Kept for docs / older notes only — do not use in new code.
- */
-export const ROOF_ORDER_ADD_LONG_AT_FT = 28;
 
-/** Gable wall stock above roof-line (inches). benchmark: +1′2″ → 18′2″ steps on 30×12. */
+/** Gable wall stock above roof-line (inches). PBP matrix: +1′2″ → 18′2″ steps on 30×12. */
 export const GABLE_STOCK_ABOVE_RAKE_IN = 14;
 
 /** Legacy name — peak-snap tuck uses related extras; bury is pad-aware below. */
 export const EAVE_WALL_STOCK_ABOVE_EAVE_IN = 8;
 
 /**
- * Wall sheet past finished floor / into grade when there is NO slab (inches).
- * With slab: bury = 10 − slabThickness (6″ pad → 4″).
+ * Eave wall sheet allowance beyond the eave height (inches).
+ *
+ * Levi's rule: an eave sheet with no framed overhang gets 12″ added. That one
+ * figure covers both ends of the sheet — the truss heel above the eave line,
+ * and the few inches below grade that carry it down to the rat guard — so a
+ * 12′ eave wall orders a 13′ sheet.
+ *
+ * It does not change with a slab. The sheet drops past the slab edge to the
+ * rat guard either way; what a slab changes is the frame height it hangs on
+ * (see frameEaveHeightFt), which makes the sheet longer, not shorter.
  */
-export const WALL_PANEL_BELOW_FLOOR_IN = 10;
+export const WALL_PANEL_BELOW_FLOOR_IN = 12;
 
 // ── Girts ───────────────────────────────────────────────────────────
 
@@ -72,19 +95,19 @@ export const GIRT_STOCK_FT = 20;
  *
  * Small plain shops (any length with low eave, no lean): continuous LF girts,
  * rows stop below eave, no eave sub-fascia / gable fly. Matches:
- *   30×40×12 → 35@20′, 40×40×12 → 40@20′, 60×60×10 → 48@20′ (benchmark).
+ *   30×40×12 → 35@20′, 40×40×12 → 40@20′, 60×60×10 → 48@20′ (PBP matrix).
  *
- * Length alone does NOT force full package — benchmark 60×60×10 is still small-shop
+ * Length alone does NOT force full package — PBP matrix 60×60×10 is still small-shop
  * despite L ≥ 50′ (was wrongly 60 girts + fly rafters).
  *
  * Tall / lean jobs (eave ≥ 14′ or lean): eave girt row + per-wall pack + fascia
  * package → Levi 55×80×14 + lean ~130@20′.
  */
 /**
- * Always benchmark-matched package selection from building geometry.
+ * Always PBP matrix-matched package selection from building geometry.
  * (Internal test override: b.orderPackageMode = 'small'|'full' — not exposed in UI.)
  *
- * benchmark rules we follow automatically:
+ * PBP shop rules we follow automatically:
  *   - Plain low eave (eave < 14′, no enclosed lean) → small-shop package
  *   - Eave ≥ 14′ OR enclosed lean → full production package
  */
@@ -143,13 +166,13 @@ export function gableLeanCount(b) {
 
 /**
  * Whether to use full production package (girts/trim/fly/opening lumber).
- * Always matches Benchmark sizing rules when orderPackageMode is auto (default).
+ * Always matches PBP matrix sizing rules when orderPackageMode is auto (default).
  */
 export function useFullGirtPackage(b) {
   const mode = orderPackageMode(b);
   if (mode === 'full') return true;
   if (mode === 'small') return false;
-  // --- benchmark auto ---
+  // --- PBP matrix auto ---
   const H = Number(b?.eaveHeight) || 0;
   // Enclosed lean or tall eave → full per-wall package (Levi-style)
   return hasEnclosedLean(b) || H >= 14;
@@ -183,7 +206,7 @@ export function girtPackMode(b) {
  * Whether mid-gable posts with required ~18.1–18.5′ demote 20′→18′ stock.
  *
  * Explicit `b.midGablePostPolicy`:
- *   keep20 / 20 → false (order covering 20′ — Frank benchmark 35×50)
+ *   keep20 / 20 → false (order covering 20′ — Frank PBP matrix 35×50)
  *   demote18 / 18 → true
  *   auto (default) → package + width/lean rule below
  *
@@ -209,7 +232,7 @@ export function useMidGable18Demotion(b) {
 /**
  * Explicit keep20 policy (not auto-wide / auto-full).
  * Lifts mid-gable posts that landed on 18′ (req ~16.1–18.5′) to covering 20′
- * so odd-width barns (35′) match benchmark 4@20′ — demotion alone only covers the
+ * so odd-width barns (35′) match PBP matrix 4@20′ — demotion alone only covers the
  * 18.1–18.5′ band (2 of 4 stations when W is not a multiple of spacing).
  */
 export function isExplicitMidGableKeep20(b) {
@@ -224,11 +247,32 @@ export function isExplicitMidGableKeep20(b) {
  * Open carport leans do NOT (Prater open lean matches plain 30×40 → 35@20′).
  */
 export function girtIncludeEaveNailer(b) {
-  // Long plain shops (L ≥ 80′) still get an eave girt row in benchmark (Harr 40×80 → 68@20′).
-  const L = Number(b?.length) || 0;
-  // Compact tall plain: no eave nailer (7 rows → ~44@20′ on 30×40×16).
-  if (isCompactTallPlainShop(b)) return false;
-  return useFullGirtPackage(b) || hasEnclosedLean(b) || L >= 80;
+  // Kept as a thin alias so nothing importing the old name breaks; the rule it
+  // used to hold is gone. See gableEaveGirtRow for what actually decides this.
+  return gableEaveGirtRow(b);
+}
+
+/**
+ * Does the GABLE END need a girt at sidewall height?
+ *
+ * Nothing needs a girt at the eave line on an eave wall: the 2-ply truss bearer
+ * sits there and is the top girt. On a gable end there is no bearer, and the
+ * truss's BOTTOM CHORD normally does that job — it lands at sidewall height and
+ * takes the fasteners for the metal.
+ *
+ * That only holds while the bottom chord IS at sidewall height. A scissor truss
+ * slopes its bottom chord up toward the ridge, and a parallel-chord truss slopes
+ * it with the top chord, so on those the chord leaves the wall line and a real
+ * girt has to go in. Common and attic trusses keep a flat bottom chord at the
+ * eave and need nothing.
+ *
+ * This replaces a heuristic that gave the row to any building 80' or longer,
+ * calibrated to one PBP shop order (Harr 40x80). Length has nothing to do with
+ * where a truss chord sits.
+ */
+export function gableEaveGirtRow(b) {
+  const t = b?.trussType || 'common';
+  return t === 'scissor' || t === 'parallelChord';
 }
 
 /** Waste: +1 board on large per-wall packages. */
@@ -268,7 +312,7 @@ export function purlinStationPad(b) {
 /**
  * Purlin stations per roof slope.
  * Horizontal half-run for pitch < 6 (locks 30×40 / 40×40 / 60×60).
- * Along-slope run for pitch ≥ 6 (benchmark Harr 40×80×12 6/12 → 13/side).
+ * Along-slope run for pitch ≥ 6 (PBP matrix Harr 40×80×12 6/12 → 13/side).
  */
 export function purlinRowsPerSide(b) {
   const spacingFt = (Number(b?.purlinSpacingIn) || 24) / 12;
@@ -284,7 +328,7 @@ export function purlinRowsPerSide(b) {
 
 /**
  * Extra 12′ purlin stubs for long production packages (end/ridge cut waste).
- * Levi 80′ lists need these; plain 60×60 benchmark does not (was inflating 12′ count).
+ * Levi 80′ lists need these; plain 60×60 PBP matrix does not (was inflating 12′ count).
  * Gate on L ≥ 80′ (not 60′).
  */
 export function purlinExtra12StubCount(mainRows, buildingLengthFt) {
@@ -297,7 +341,7 @@ export function purlinExtra12StubCount(mainRows, buildingLengthFt) {
 /**
  * Mid-length end/ridge stubs (12′): 50′ ≤ L < 80′.
  * Frank 50′: ceil(22/4)=6 with double-stub pack → 48@16+46@12.
- * 60×60 benchmark: ceil(34/4)=9 → with staggered upgrade yields 27@12′.
+ * 60×60 PBP matrix: ceil(34/4)=9 → with staggered upgrade yields 27@12′.
  * Not applied at L ≥ 80′ (that band uses purlinExtra12StubCount).
  */
 export function purlinMidLength12StubCount(mainRows, buildingLengthFt) {
@@ -326,9 +370,95 @@ export function purlinMainRunLengthFt(buildingLengthFt) {
  * rem after full 16′s:
  *   0 < rem ≤ 12 → one 12′ stub
  *   12 < rem < 16 → two 12′ stubs (not one 16′) so mid-length shops
- *     (e.g. 50′ → run 46′) stock leftover stations on 12′ boards (Frank benchmark).
+ *     (e.g. 50′ → run 46′) stock leftover stations on 12′ boards (Frank PBP matrix).
  * @returns {{ 16?: number, 12?: number }}
  */
+/** Purlin stock we carry. */
+export const PURLIN_STOCK_FT = [12, 14, 16, 20];
+
+/**
+ * Purlins cut to the TRUSS BAYS, with the seams staggered row to row.
+ *
+ * A purlin splices over a truss, so a piece can only span a whole number of
+ * bays. The greedy packer this replaces took 16' boards first and never looked
+ * at the spacing: at 5' o.c. a 16' board ends 1' past the third truss, so every
+ * seam landed in mid-air. It looked efficient on the order and could not be
+ * built as written.
+ *
+ * Whole bays also change WHICH board you buy. Three bays at 5' is 15', so that
+ * piece is a 16' board, not a 20' — which is exactly the case Levi described.
+ *
+ * Stagger: consecutive rows must not seam on the same truss. Row r starts with a
+ * short piece of (maxBays - r % maxBays) bays and then runs full-length pieces,
+ * so each row's joints sit one bay along from its neighbour's.
+ *
+ * @param {number} runLenFt  length of the run
+ * @param {number} bayFt     truss spacing
+ * @param {number} rowIndex  which purlin row, for the stagger offset
+ */
+export function packPurlinRunByBays(runLenFt, bayFt, rowIndex = 0) {
+  const run = Math.max(0, Number(runLenFt) || 0);
+  const bay = Math.max(0.5, Number(bayFt) || 5);
+  if (run < 0.01) return {};
+
+  const maxStock = PURLIN_STOCK_FT[PURLIN_STOCK_FT.length - 1];
+  /** Smallest stock covering n bays, or null when none reaches. */
+  const stockFor = (n) => {
+    const need = n * bay;
+    for (const L of PURLIN_STOCK_FT) if (L >= need - 1e-9) return L;
+    return null;
+  };
+  const maxBays = Math.max(1, Math.floor(maxStock / bay + 1e-9));
+  if (!stockFor(1)) {
+    // A single bay outruns our longest board. Order one board per bay and let
+    // the shortfall read as waste rather than pack a joint in mid-air.
+    return { [maxStock]: Math.max(1, Math.round(run / bay)) };
+  }
+
+  const total = Math.max(1, Math.round(run / bay));
+
+  // Cheapest way to cover n bays, pieces of 1..maxBays, each on the smallest
+  // stock that covers it. Greedy "longest first" is not optimal: at 5' bays,
+  // 13 bays greedily is 4+4+4+1 (20+20+20+12 = 72') where 4+4+3+2 is 68'.
+  const best = new Array(total + 1).fill(Infinity);
+  const pick = new Array(total + 1).fill(0);
+  best[0] = 0;
+  for (let n = 1; n <= total; n += 1) {
+    for (let k = 1; k <= Math.min(maxBays, n); k += 1) {
+      const L = stockFor(k);
+      if (!L) continue;
+      const cost = best[n - k] + L;
+      if (cost < best[n] - 1e-9) {
+        best[n] = cost;
+        pick[n] = k;
+      }
+    }
+  }
+
+  const counts = {};
+  const add = (n) => {
+    const L = stockFor(n);
+    if (L) counts[L] = (counts[L] || 0) + 1;
+  };
+
+  // Stagger: step the first joint one bay along per row so neighbouring rows
+  // never break on the same truss. The rest of the row is then packed
+  // optimally, so the stagger costs one short piece and nothing more.
+  let rest = total;
+  const offset = maxBays > 1 ? rowIndex % maxBays : 0;
+  if (offset > 0 && total > maxBays) {
+    const first = maxBays - offset;
+    add(first);
+    rest = total - first;
+  }
+  while (rest > 0) {
+    const k = pick[rest] || Math.min(maxBays, rest);
+    add(k);
+    rest -= k;
+  }
+  return counts;
+}
+
 export function packPurlinRun(runLenFt) {
   const counts = {};
   let rem = Math.max(0, Number(runLenFt) || 0);
@@ -426,8 +556,8 @@ export function purlinDoubleStubUpgradeCount(mainRows, runLenFt) {
  * Locks:
  *   30×40 → 36@16 + 18@12
  *   40×40 → 48@16 + 24@12
- *   35×50 → 48@16 + 46@12  (Frank benchmark — double-12 stub + mid stubs)
- *   60×60 → 118@16 + 27@12  (benchmark)
+ *   35×50 → 48@16 + 46@12  (Frank PBP matrix — double-12 stub + mid stubs)
+ *   60×60 → 118@16 + 27@12  (PBP matrix)
  *   Levi main (before lean) → 128@16 + 43@12
  *
  * @returns {{ 16: number, 12: number }}
@@ -436,68 +566,30 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
   const rows = Math.max(0, Number(mainRows) || 0);
   const L = Number(buildingLengthFt) || 0;
   const run = purlinMainRunLengthFt(L);
-  const counts = { 16: 0, 12: 0 };
-  if (rows <= 0 || run < 0.1) return counts;
+  if (rows <= 0 || run < 0.1) return {};
 
-  // Steep plain shops on multiple-of-16 lengths: benchmark stocks full-L 16′ boards
-  // (Harr 80′ → 5×16/row = 130@16, not 4×16+12 on the 76′ inset run).
-  const pitch = Number(b?.pitch) || 0;
-  const fullLPack =
-    !!b &&
-    pitch >= 6 &&
-    !hasAnyLean(b) &&
-    L >= 80 &&
-    Math.abs(L % 16) < 1e-9;
-  const packRun = fullLPack ? L : run;
-
-  const one = packPurlinRun(packRun);
-  counts[16] = (one[16] || 0) * rows;
-  counts[12] = (one[12] || 0) * rows;
-
-  const up = fullLPack ? 0 : purlinStaggerUpgradeCount(rows, packRun);
-  if (up > 0) {
-    const can = Math.min(up, counts[12]);
-    counts[12] -= can;
-    counts[16] += can;
-  }
-
-  const up2 = fullLPack ? 0 : purlinDoubleStubUpgradeCount(rows, packRun);
-  if (up2 > 0) {
-    const can = Math.min(up2, counts[12]);
-    counts[12] -= can;
-    counts[16] += can;
-  }
-
-  const mid12 = fullLPack ? 0 : purlinMidLength12StubCount(rows, L);
-  if (mid12 > 0) counts[12] += mid12;
-
-  let long12 = purlinExtra12StubCount(rows, L);
-  // Harr-class: 26 rows × full 80′ → 130@16 needs 10×12′ end/ridge stubs (ceil(L/8)).
-  if (fullLPack) long12 = Math.max(long12, Math.ceil(L / 8));
-  if (long12 > 0) counts[12] += long12;
-
-  // Partial enclosed shed lean: benchmark mixes heavier 12′ on the main (Doug 47@16+73@12).
-  // Reverse stagger-heavy 16′ pack and add mid stubs — Mark/Levi full-length leans skip.
-  if (!fullLPack && hasPartialEnclosedShedLean(b)) {
-    const demote = Math.min(counts[16] || 0, Math.round(rows * 1.1));
-    if (demote > 0) {
-      counts[16] -= demote;
-      counts[12] = (counts[12] || 0) + demote;
+  // Cut to the TRUSS BAYS, staggered row to row.
+  //
+  // What this replaces was greedy on 16' boards and blind to truss spacing, then
+  // patched with three corrections that each came off one PBP matrix: a stagger
+  // "upgrade" promoting some 12s to 16s, a double-stub upgrade, and a whole
+  // special case for steep shops whose length divides by 16 (Harr 80' -> 130@16).
+  // At 5' o.c. a 16' board ends a foot past the third truss, so every seam it
+  // ordered landed in mid-air — efficient on the order, unbuildable as written.
+  //
+  // Now each row is partitioned into whole bays and each piece takes the
+  // smallest stock that covers it, so three bays at 5' buys a 16' board and four
+  // buys a 20'. Rows step their first joint along by a bay so neighbours never
+  // seam on the same truss.
+  const bay = Math.max(0.5, Number(b?.trussSpacing) || 5);
+  const counts = {};
+  for (let r = 0; r < rows; r += 1) {
+    const one = packPurlinRunByBays(run, bay, r);
+    for (const [len, qty] of Object.entries(one)) {
+      const n = Number(qty) || 0;
+      if (n > 0) counts[Number(len)] = (counts[Number(len)] || 0) + n;
     }
-    const extra = Math.max(0, Math.ceil(rows / 2) - mid12);
-    if (extra > 0) counts[12] = (counts[12] || 0) + extra;
-  } else if (!fullLPack && b && hasWoodOverhangStandardEave(b) && L > 0 && L <= 40) {
-    // Short wood-OH shops: demote floor(rows/2) of 16′ → 12′ + ~0.4×rows stubs
-    // → plain 30@16+38@12; open lean adds ~6@12 → Pulver 30/44.
-    const demote = Math.min(counts[16] || 0, Math.floor(rows / 2));
-    if (demote > 0) {
-      counts[16] -= demote;
-      counts[12] = (counts[12] || 0) + demote;
-    }
-    const stubs = Math.max(0, Math.round(rows * 0.4));
-    if (stubs > 0) counts[12] = (counts[12] || 0) + stubs;
   }
-
   return counts;
 }
 
@@ -507,16 +599,28 @@ export function packMainPurlinBoards(mainRows, buildingLengthFt, b = null) {
 /**
  * Truss block sets (12′ 2×6). Main: ceil(L/40).
  * A gable-style lean carries its own mini-ridge/truss and needs one extra set
- * (benchmark 60′+gable-lean → 3). Shed leans hang off the main purlins and add none
- * (benchmark Levi 80′+shed-lean → 2, not 3).
+ * (PBP matrix 60′+gable-lean → 3). Shed leans hang off the main purlins and add none
+ * (PBP matrix Levi 80′+shed-lean → 2, not 3).
  * @param {number} buildingLengthFt
  * @param {object} [b]
  */
 export function trussBlockQty(buildingLengthFt, b = null) {
+  // Two 16" blocks per truss, gable ends excluded — they bear on the end wall
+  // and take no blocking. Ordered as 2x6 @ 12', which yields nine 16" blocks a
+  // board.
+  //
+  // Was ceil(length / 40) boards, plus one per gable extension: a rule keyed to
+  // building length that ignored truss spacing entirely, so a 2' o.c. job and
+  // an 8' o.c. job of the same length blocked identically when one has four
+  // times the trusses.
   const L = Number(buildingLengthFt) || 0;
-  let n = Math.max(1, Math.ceil(L / 40 - 1e-9));
-  if (b) n += gableLeanCount(b);
-  return n;
+  const sp = Math.max(1, Number(b?.trussSpacing) || 5);
+  const total = Math.floor(L / sp + 1e-9) + 1;
+  const gableTrusses = (b?.roofStyle || 'gable') === 'gable' && total >= 2 ? 2 : 0;
+  const interior = Math.max(0, total - gableTrusses);
+  const BLOCKS_PER_TRUSS = 2;
+  const BLOCKS_PER_BOARD = 9; // 12' board / 16" block
+  return Math.max(1, Math.ceil((interior * BLOCKS_PER_TRUSS) / BLOCKS_PER_BOARD));
 }
 
 /**
@@ -545,6 +649,10 @@ export function gableFlyRafterQty(buildingWidthFtOrBuilding, spacingFt) {
 
 /** Metal inches used for panel slope (min drip if 0/blank). */
 export function panelMetalOverhangIn(b) {
+  if (b?.metalOverhangEaveIn != null && Number.isFinite(Number(b.metalOverhangEaveIn))) {
+    const m = Number(b.metalOverhangEaveIn);
+    if (m > 0) return m;
+  }
   const m = Number(b?.metalOverhangIn);
   if (Number.isFinite(m) && m > 0) return m;
   return PANEL_METAL_DRIP_MIN_IN;
@@ -552,60 +660,53 @@ export function panelMetalOverhangIn(b) {
 
 /** Frame + metal OH in feet for roof panel slope. */
 export function panelTotalOverhangFt(b) {
-  const frame = (Number(b?.overhangIn) || 0) / 12;
-  return frame + panelMetalOverhangIn(b) / 12;
+  // Eave (slope) OH drives roof panel run.
+  const frameIn =
+    b?.overhangEaveIn != null && Number.isFinite(Number(b.overhangEaveIn))
+      ? Number(b.overhangEaveIn)
+      : Number(b?.overhangIn) || 0;
+  const metalIn =
+    b?.metalOverhangEaveIn != null && Number.isFinite(Number(b.metalOverhangEaveIn))
+      ? Number(b.metalOverhangEaveIn)
+      : panelMetalOverhangIn(b);
+  return (Math.max(0, frameIn) + Math.max(0, metalIn)) / 12;
 }
 
 /**
- * One-side roof panel slope length (ft) for ORDER cuts.
- * Independent of framing rafterLength when UI metal OH is 0.
+ * One-side roof panel slope length (ft), drip edge included — what the sheet
+ * actually covers before it is rounded to a cut.
+ *
+ * Delegates to measure.js, which measures ridge-to-eave along the plane and
+ * adds a metal-only overhang along that same plane. This used to fold the
+ * overhang into the horizontal run instead, which under-measured the slope.
  */
 export function roofPanelSlopeLengthFt(b) {
-  const oh = panelTotalOverhangFt(b);
-  const W = Number(b?.width) || 0;
-  const pitch = (Number(b?.pitch) || 4) / 12;
-  // Production model (Levi / benchmark): vertical rise = wall half-run × pitch;
-  // metal OH extends the horizontal run past the eave (not re-scaling rise).
-  // Matches free-side 29′11″ on 55′ @ 6″ OH and continuous lean host cuts.
-  if ((b?.roofStyle || 'gable') === 'mono') {
-    return Math.hypot(W + oh, W * pitch);
-  }
-  const half = W / 2;
-  return Math.hypot(half + oh, half * pitch);
+  return measureRoofPlane(b).panelSlopeFt;
 }
 
 /**
- * Order-cut allowance — ONE primary rule + square-eave bands:
- *
- *   1) Wood-frame OH (overhangIn ≥ 6″) → always metal drip (3″)
- *      Explains BOTH Doug (~30′ @ 3/12 → 16′11″) and Pulver (30′ @ 4/12 → 17′3″).
- *      Same add used on shed lean order cuts when the main has wood OH.
- *
- *   2) Square eave (no wood frame OH):
- *      slope < 20′              → 1.5″ (30×40 @ 3″ OH → 16′2″)
- *      slope ≥ 20′, metal < 6″  → 2″   (40×40 → 21′6″; 60×60 → 32′0″)
- *      slope ≥ 20′, metal ≥ 6″  → 5.5″ (Levi free side → 29′11″)
- *
- * Long add is tied to wide metal OH, not slope alone — otherwise 60×60 @ 3″
- * wrongly got 32′4″ instead of benchmark 32′0″.
- *
- * Intentional packaging delta (NOT in this formula): some square-eave Job
- * Reviews (Kane ~32′×4/12) list ~18′4″. Score that as packaging delta vs
- * formula 17′3″ — do not reintroduce a slope mid-band special case.
- *
- * @param {number} slopeFt
- * @param {object} [b] building (for metal / frame OH); omit → mid/short by slope
+ * Ridge to the outside face of the framing along the plane (ft) — no drip.
+ * Framing lengths and the plan sheets want this one.
  */
-export function roofPanelOrderAddInches(slopeFt, b = null) {
-  const metalIn =
-    b != null ? panelMetalOverhangIn(b) : PANEL_METAL_DRIP_MIN_IN;
-  // Wood-frame OH packages: order add = metal drip. Slope band does not matter.
-  if (hasWoodOverhangStandardEave(b)) return PANEL_METAL_DRIP_MIN_IN;
+export function roofStructuralSlopeFt(b) {
+  return measureRoofPlane(b).structuralSlopeFt;
+}
 
-  const s = Number(slopeFt) || 0;
-  if (s < ROOF_ORDER_ADD_MID_AT_FT) return ROOF_ORDER_ADD_SHORT_IN;
-  if (metalIn >= 6) return ROOF_ORDER_ADD_LONG_IN;
-  return ROOF_ORDER_ADD_MID_IN;
+/**
+ * @deprecated There is no order-add any more.
+ *
+ * This returned 1.5″, 2″ or 5.5″ chosen by slope length and overhang width,
+ * and each of those three numbers had been fitted to a single job. Stacked on
+ * a slope that already carried the overhang, they put Levi's worked 50′ 4/12
+ * example at 26′9″ when the tape says 26′8″. A sheet is now measured, not
+ * measured-then-padded: whatever overhang somebody entered is the only thing
+ * added, and the result rounds up to the next inch.
+ *
+ * Still exported, returning 0, so any caller that has not been migrated fails
+ * loudly on review rather than quietly re-padding.
+ */
+export function roofPanelOrderAddInches() {
+  return 0;
 }
 
 /** Nearest inch. */
@@ -613,16 +714,19 @@ export function roundToNearestInch(ft) {
   return Math.round(Number(ft) * 12) / 12;
 }
 
+/**
+ * Roof sheet cut length (ft). 50′ @ 4/12 with 3″ of metal → 26′8″.
+ * Rounds UP: a long sheet gets trimmed on site, a short one is scrap.
+ */
 export function roofPanelCutLengthFt(b) {
-  const slope = roofPanelSlopeLengthFt(b);
-  return roundToNearestInch(slope + roofPanelOrderAddInches(slope, b) / 12);
+  return measureRoofPlane(b).panelCutFt;
 }
 
 /**
  * Geometric gable peak height above grade (eave + half-width × pitch).
  */
 export function gableGeometricPeakFt(b) {
-  const eave = Number(b?.eaveHeight) || 12;
+  const eave = frameEaveHeightFt(b);
   const half = (Number(b?.width) || 30) / 2;
   const pitch = (Number(b?.pitch) || 4) / 12;
   return eave + half * pitch;
@@ -631,7 +735,7 @@ export function gableGeometricPeakFt(b) {
 /**
  * Peak wall-panel stock height (ft) after production snap.
  * Base: geo peak + 14″. When that lands on ~18′6″ (e.g. 32′×12′ 4/12),
- * benchmark snaps peak stock to 20′ (Kane Job Review: 2@20′ + 19′6″ ladder).
+ * PBP matrix snaps peak stock to 20′ (yard Job Review: 2@20′ + 19′6″ ladder).
  * 30×12 stays ~18′2″; 40×12 stays ~19′10″.
  */
 export function gablePeakStockHeightFt(b) {
@@ -654,8 +758,8 @@ export function gableStockAboveRakeFt(b = null) {
 
 /**
  * Ladder step for gable wall packing (inches).
- * Kane peak-snap → 6″. Otherwise match roof-line drop per 3′ bay:
- * coverage × pitch (4/12 → 12″, 6/12 → 18″). benchmark Harr uses 18″ steps.
+ * peak-snap → 6″. Otherwise match roof-line drop per 3′ bay:
+ * coverage × pitch (4/12 → 12″, 6/12 → 18″). PBP matrix Harr uses 18″ steps.
  */
 export function gablePanelLadderInches(b) {
   const geo = gableGeometricPeakFt(b);
@@ -666,56 +770,62 @@ export function gablePanelLadderInches(b) {
 }
 
 /**
- * Resolve slab on/thickness from main building or a lean host.
+ * Inches of wall sheet past finished floor.
+ *
+ * A SLAB DOES NOT SHORTEN THIS. The sheet drops past the edge of the slab and
+ * carries on down to the rat guard, which sits at the same elevation whether
+ * the building has a slab or bare ground — so a 12′ eave wall orders the same
+ * length on a 4″ pad as it does without one. This used to subtract the slab
+ * thickness (a 6″ pad turned a 10″ bury into 4″), which shortened the sheet on
+ * every slab job and left open exactly the gap the rat guard is there to close.
+ *
+ * The one case that genuinely differs is a wood-frame overhang of 6″ or more,
+ * which sits about 2″ below the floor rather than the full bury. That is not a
+ * leftover from calibration: Levi's own sheet worked that case out at 12′1″ on
+ * a 12′ eave and he keeps the 12′2″ this produces.
  */
-function slabSpec(b, host = null) {
-  if (host) {
-    return {
-      hasSlab: host.hasSlab === true,
-      thicknessIn: Math.max(
-        0,
-        Number(host.slabThicknessIn) || Number(b?.slabThicknessIn) || 0,
-      ),
-    };
-  }
-  return {
-    hasSlab: b?.hasSlab === true,
-    thicknessIn: Math.max(0, Number(b?.slabThicknessIn) || 0),
-  };
+export function wallPanelBelowFloorIn(b, host = null) {
+  // Eave wall sheet = frame eave height + heel + this (eaveWallPanelHeightFt).
+  //
+  // The 12″ is Levi's rule for a sheet with NO framed overhang: truss heel plus
+  // the bury down to the rat guard, so a 12′ eave wall orders 13′. A building
+  // that HAS a framed overhang is not that case and keeps what it had —
+  //
+  //   framed overhang, gable : 2″. Levi's own sheet made this 12′1″ on a 12′
+  //                            eave and he keeps the 12′2″ this gives.
+  //   framed overhang, mono  : 10″. Tim Williams 16×40×16 5/12 with a 12″
+  //                            overhang ships a 23′11″ high-side wall, which
+  //                            is a real order rather than a calibration.
+  //   no framed overhang     : 12″.
+  //
+  // A slab does not appear here at all. It lifts the frame instead (see
+  // frameEaveHeightFt), which lengthens the sheet rather than shortening it.
+  const isMono = (b?.roofStyle || 'gable') === 'mono';
+  if (hasWoodOverhangStandardEave(b)) return isMono ? 10 : 2;
+  return WALL_PANEL_BELOW_FLOOR_IN;
 }
 
 /**
- * Inches of wall sheet past finished floor.
- * No slab → 10″. With slab → max(0, 10 − thickness). 6″ pad → 4″.
+ * @deprecated Always 0 — a slab no longer shortens a wall sheet.
+ *
+ * This returned the slab thickness, and every caller subtracted it from the
+ * ordered height. Kept, returning 0, so an unmigrated caller is visible on
+ * review rather than silently re-shortening a sheet.
  */
-export function wallPanelBelowFloorIn(b, host = null) {
-  // Eave wall sheet = eaveHeight + heelHeightFt + bury (see eaveWallPanelHeightFt).
-  //   square-eave / mono: 10″ bury (30×40 → 12′10″; Tim mono wood-OH keeps 10″)
-  //   wood-frame OH gable: 2″ bury (Pulver 16′ → 16′2″; +heel when raised seat)
-  // With slab: bury = base − slabThickness (6″ pad → base−6).
-  const isMono = (b?.roofStyle || 'gable') === 'mono';
-  const base =
-    hasWoodOverhangStandardEave(b) && !isMono
-      ? 2
-      : WALL_PANEL_BELOW_FLOOR_IN;
-  const { hasSlab, thicknessIn } = slabSpec(b, host);
-  if (hasSlab) return Math.max(0, base - thicknessIn);
-  return base;
-}
-
-/** Inches shorter vs no-slab order (usually = slab thickness when pad on). */
-export function wallPanelSlabShortenIn(b, host = null) {
-  return Math.max(0, WALL_PANEL_BELOW_FLOOR_IN - wallPanelBelowFloorIn(b, host));
+export function wallPanelSlabShortenIn() {
+  return 0;
 }
 
 export function eaveWallPanelHeightFt(b) {
-  const eave = Number(b?.eaveHeight) || 12;
-  // Raised heel lifts the top-of-wall / FJ plane (Doug SB 2′6″ → eave wall
-  // above 3′ wainscot lands ~15′5–15′6″, not eave-only ~13′). Heel 0 is a no-op
-  // for square/wood-OH shops without a raised seat (Pulver stays eave+bury).
+  // From GRADE — a slab lifts the frame, so the sheet grows with it.
+  const eave = frameEaveHeightFt(b);
+  // An explicitly raised heel lifts the top-of-wall plane on top of the
+  // standard allowance below, which already covers an ordinary truss heel.
   const heel = Math.max(0, Number(b?.heelHeightFt) || 0);
-  // Pad-aware bury: 10″ no slab, 10″ − slab thk with pad (6″ → 4″).
-  // Peak-snap (32×12): +12″ tuck so no-slab ≈ eave+22″; with 6″ pad ≈ eave+16″.
+  // 12″ with no framed overhang — truss heel plus the bury down to the rat
+  // guard — so a 12′ eave wall orders 13′. A framed overhang of 6″ or more
+  // sits about 2″ below the floor instead; that is Levi's rule, not a leftover
+  // (his own sheet worked it out at 12′1″ and he keeps the 12′2″ here).
   const below = wallPanelBelowFloorIn(b);
   const ladder = gablePanelLadderInches(b);
   const peakTuck = ladder === 6 ? 12 : 0;
@@ -728,6 +838,15 @@ export function eaveWallPanelHeightFt(b) {
 export const TRIM_STOCK_FT = 10;
 
 /**
+ * Eave trim stock (ft). The sticks are 10'2", not 10'.
+ *
+ * Levi's worked case: an 80' building takes 8 sticks a side — 8 x 10'2" is
+ * 81'4", so 1'4" over the run. Ordering it as 10' stock buys a stick that does
+ * not exist and lands two short of what the wall needs.
+ */
+export const EAVE_TRIM_STOCK_FT = 10 + 2 / 12;
+
+/**
  * Extra starter/lap pieces on long buildings (ridge / eave runs).
  * L ≥ 60′ → +2 (Levi 80′: ridge 10, eave edge 18).
  * L < 60′ → +1 (30×40: ridge 5, eave edge 9).
@@ -735,7 +854,7 @@ export const TRIM_STOCK_FT = 10;
 export function trimRunExtraPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
   if (L < 60) {
-    // Wood-OH mid shops: benchmark adds an extra lap (Frank 50′ → ridge 7 / eave 12).
+    // Wood-OH mid shops: PBP matrix adds an extra lap (Frank 50′ → ridge 7 / eave 12).
     // Square-eave plains (30×40 / 40×40 overhangIn 0) stay +1.
     const woodOh = Number(b?.overhangIn) || 0;
     if (b && woodOh >= 6 && L >= 50) return 2;
@@ -749,7 +868,7 @@ export function trimRunExtraPieces(buildingLengthFt, b = null) {
 
 /**
  * Ridge cap pieces of 10′ along main ridge + gable lean ridges.
- * Main: ceil(L/10)+extra. Each gable lean: +1 (benchmark 60′+lean → 9).
+ * Main: ceil(L/10)+extra. Each gable lean: +1 (PBP matrix 60′+lean → 9).
  * @param {number} buildingLengthFt
  * @param {object} [b] optional building for lean extras
  */
@@ -767,7 +886,7 @@ export function ridgeCapPieces(buildingLengthFt, b = null) {
         // Wing ridge runs along depth (Jim 43′ → ceil(43/10)+1)
         n += Math.max(1, Math.ceil(depth / stock - 1e-9) + 1);
       } else {
-        // Plain gable lean: +1 stock (benchmark 60′+lean → 9)
+        // Plain gable lean: +1 stock (PBP matrix 60′+lean → 9)
         n += 1;
       }
     }
@@ -776,27 +895,128 @@ export function ridgeCapPieces(buildingLengthFt, b = null) {
 }
 
 /**
+ * True when a lean's roof comes straight off the main roof line.
+ *
+ * A shed lean on an eave wall at the main's own pitch is not a separate roof —
+ * the main plane simply carries on down past the wall and the eave ends up at
+ * the LEAN's outer edge. There is no eave on the main wall under it, so it gets
+ * no eave trim: you do not double it up.
+ *
+ * A broken-pitch lean is the other case. The main roof still stops at its own
+ * eave and the lean starts below it, so both eaves are real and both get trim.
+ *
+ * Deliberately NOT the same test as engine.js's eaveShedLeanForContinuousFold,
+ * which additionally drops short partial leans out of the continuous fold. That
+ * is a decision about how roof SHEETS are ordered; a 10' lean at matching pitch
+ * still continues the roof plane, and there is still no eave under it.
+ */
+export function leanContinuesMainRoofLine(b, lt) {
+  if (!lt) return false;
+  if ((lt.roofStyle || 'shed') === 'gable') return false;
+  const kind = lt.kind || 'leanto';
+  if (kind === 'gable-extension' || kind === 'wrap' || kind === 'wrap-lean') return false;
+  if (lt.wall !== 'left' && lt.wall !== 'right') return false;
+  if ((Number(lt.depth) || 0) <= 0.1) return false;
+  const main = Number(b?.pitch) || 4;
+  const p = Number(lt.pitch);
+  const leanPitch = Number.isFinite(p) && p > 0 ? p : main;
+  return Math.abs(leanPitch - main) < 0.01;
+}
+
+/** Length of a lean along the wall it sits on (ft). */
+export function leanRunAlongWallFt(b, lt) {
+  if (!lt) return 0;
+  const wall = lt.wall || 'right';
+  const wallLen =
+    wall === 'left' || wall === 'right' ? Number(b?.length) || 0 : Number(b?.width) || 0;
+  const offset = Number(lt.offset) || 0;
+  const len =
+    Number(lt.length) > 0
+      ? Math.min(Number(lt.length) || 0, Math.max(0, wallLen - offset))
+      : Math.max(0, wallLen - offset);
+  return Math.max(0, len);
+}
+
+/**
+ * Every run of eave on the building, in feet.
+ *
+ * Two down the main building — each ordered on its own, since an offcut from
+ * one wall cannot be carried round to the other — less whatever a wing is
+ * butted against, plus one down each shed lean's length.
+ *
+ * It is a list rather than a total because different trims come on different
+ * sticks: eave trim is 10'2", the single-angle fascia that follows the same
+ * line is 10'. Packing a shared total at one stock length gets the other wrong,
+ * which is exactly what happened when the fascia count was borrowed from the
+ * eave trim count.
+ *
+ * @returns {number[]}
+ */
+export function eaveRunsFt(b, buildingLengthFt = null) {
+  const L = Number(buildingLengthFt != null ? buildingLengthFt : b?.length) || 0;
+  const runs = [];
+
+  // A lean whose roof comes straight off the main roof line leaves no eave on
+  // the wall beneath it — the eave is at the lean's outer edge instead. Only
+  // the stretch it actually covers comes off, so a 50' lean on an 80' wall
+  // still leaves 30' of main eave to trim.
+  const continuedOnWall = (w) =>
+    (b?.leanTos || []).reduce(
+      (t, lt) =>
+        lt && lt.wall === w && leanContinuesMainRoofLine(b, lt)
+          ? t + leanRunAlongWallFt(b, lt)
+          : t,
+      0,
+    );
+
+  for (const w of ['left', 'right']) {
+    const gone = Math.min(ellBuriedRunOnWall(b, w) + continuedOnWall(w), L);
+    const run = Math.max(0, L - gone);
+    if (run > 0.01) runs.push(run);
+  }
+
+  for (const lt of b?.leanTos || []) {
+    if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
+    if ((lt.roofStyle || 'shed') === 'gable') continue;
+    const leanLen = leanRunAlongWallFt(b, lt);
+    if (leanLen > 0.01) runs.push(leanLen);
+  }
+  return runs;
+}
+
+/** Sticks to cover each run separately, at the given stock length. */
+export function packRunsAtStock(runs, stockFt) {
+  const stock = Number(stockFt) || 10;
+  return (runs || []).reduce(
+    (t, r) => t + (r > 0.01 ? Math.ceil(r / stock - 1e-9) : 0),
+    0,
+  );
+}
+
+/**
  * Eave edge pieces for both main eaves + lean outer eaves.
  * Main: ceil(2L/10)+extra. A gable lean adds an outer eave run that returns to
- * the main roof at two valleys → +1 stock piece (benchmark 60′+gable-lean → 15).
+ * the main roof at two valleys → +1 stock piece (PBP matrix 60′+gable-lean → 15).
  * Shed leans drain onto the main eave line and add no separate eave-edge stock
- * (benchmark Levi 80′+shed-lean → 18, not 19).
+ * (PBP matrix Levi 80′+shed-lean → 18, not 19).
  * @param {number} buildingLengthFt
  * @param {object} [b] optional building for lean extras
  */
 export function eaveTrimPieces(buildingLengthFt, b = null) {
   const L = Number(buildingLengthFt) || 0;
-  const stock = TRIM_STOCK_FT;
-  // Both eaves, less whatever a wing stands in front of: there is no eave to
-  // trim where another building is butted against it.
-  const buried = ['left', 'right'].reduce(
-    (t, w) => t + Math.min(ellBuriedRunOnWall(b, w), L),
-    0,
-  );
-  const eaveRun = Math.max(0, 2 * L - buried);
-  let n = Math.max(1, Math.ceil(eaveRun / stock - 1e-9) + trimRunExtraPieces(L, b));
-  // Plain gable leans (not gable-extension): +1 outer eave return (benchmark 60′+lean → 15)
+  const stock = EAVE_TRIM_STOCK_FT;
+  const sticks = (runFt) => (runFt > 0.01 ? Math.ceil(runFt / stock - 1e-9) : 0);
+
+  // Each eave run packed on its own, at the real 10'2" stick. An 80' building
+  // takes 8 a side, 16 in all, and the 1'4" of lap falls out of the stock
+  // length rather than being added as a spare piece.
+  //
+  // What this replaced pooled both eaves into one run (ceil(2L / 10)) and added
+  // a calibrated +1 or +2 on top, which put that 80' building at 18.
+  let n = packRunsAtStock(eaveRunsFt(b, L), stock);
+
   if (b) {
+    // A plain gable lean turns an eave return at its outer corner.
     const plainGableLeans = (b.leanTos || []).filter(
       (lt) =>
         lt &&
@@ -805,33 +1025,12 @@ export function eaveTrimPieces(buildingLengthFt, b = null) {
         (Number(lt.depth) || 0) > 0.1,
     ).length;
     if (plainGableLeans > 0) n += 1;
-    // Gable-extension: two eaves along wing depth (Jim 2×43′ → +9 → EaveEdge 19)
+    // A gable-extension wing carries two eaves down its depth.
     for (const lt of b.leanTos || []) {
       if (!lt || (lt.kind || 'leanto') !== 'gable-extension') continue;
       const depth = Number(lt.depth) || 0;
       if (!(depth > 0.1)) continue;
-      n += Math.max(1, Math.ceil((2 * depth) / stock - 1e-9));
-    }
-  }
-  // Open shed lean outer eave drip is ordered as LET (Prater 40′ → +5 → 14).
-  // Enclosed shed leans drain at the main eave / dual-wing pack — no add.
-  if (b) {
-    for (const lt of b.leanTos || []) {
-      if (!lt || (Number(lt.depth) || 0) <= 0.1) continue;
-      if (lt.enclosed !== false && lt.enclosure !== 'open') continue;
-      if ((lt.roofStyle || 'shed') === 'gable') continue;
-      const wall = lt.wall || 'right';
-      const wallLen =
-        wall === 'left' || wall === 'right'
-          ? Number(b.length) || 0
-          : Number(b.width) || 0;
-      const offset = Number(lt.offset) || 0;
-      const leanLen =
-        Number(lt.length) > 0
-          ? Math.min(Number(lt.length) || 0, Math.max(0, wallLen - offset))
-          : Math.max(0, wallLen - offset);
-      if (leanLen <= 0.1) continue;
-      n += Math.max(1, Math.ceil(leanLen / stock - 1e-9) + 1);
+      n += 2 * sticks(depth);
     }
   }
   return n;
@@ -839,7 +1038,7 @@ export function eaveTrimPieces(buildingLengthFt, b = null) {
 
 /**
  * Valley trim pieces where gable lean meets main roof (two valleys per gable lean).
- * benchmark: 2 @ 10′ @ ~154°.
+ * PBP matrix: 2 @ 10′ @ ~154°.
  */
 export function valleyTrimPieces(b) {
   return gableLeanCount(b) * 2;
@@ -847,7 +1046,7 @@ export function valleyTrimPieces(b) {
 
 /**
  * Full production package (trim fascia/TOW + framing sub-fascia/fly):
- * Plain small shops (30×40 benchmark lists) omit these; large / tall / lean jobs include them.
+ * Plain small shops (30×40 PBP matrix lists) omit these; large / tall / lean jobs include them.
  * Same gate as full girt package.
  */
 export function includeFullTrimPackage(b) {
@@ -864,7 +1063,7 @@ export function includeFullTrimPackage(b) {
  *
  *   1. The full production package (large / tall / enclosed-lean jobs). Kept
  *      because it is how these jobs are really ordered: the Levi 55x80x14
- *      benchmark carries overhangIn 0 with a 6" METAL rake and its real order
+ *      PBP matrix carries overhangIn 0 with a 6" METAL rake and its real order
  *      still included 24 lookouts, 2 rake ends and eave sub-fascia. A
  *      metal-only overhang still needs a ladder to carry it.
  *
@@ -1070,62 +1269,90 @@ function c0Walls(wall) {
 }
 
 /**
- * Corner trim stock length(s).
- * Enclosed lean: absorbed main corners move to lean outer edge and size from
- * lean outer eave (e.g. 10′ lean → 12′ = eave + 2′ wrap), not main eave.
+ * Corner trim: the eave sidewall sheet plus a foot, one piece per corner.
  *
- * ≤12′ eave → eave+2′; 12–16′ → 16/12 mix; >16′ → 20/16 mix.
+ * Levi's rule. The corner runs the full height of the wall sheet it sits
+ * against, and the extra foot is what laps past at top and bottom.
+ *
+ * What this replaced was a ladder of bands — over 16' eave order a mix of 20'
+ * and 16', over 12' a mix of 16' and 12', otherwise eave + 2' — fitted to old
+ * order lists. It had no idea how long the wall sheet on that corner actually
+ * was, so on a 16' eave it ordered 16' and 12' pieces for a sheet standing 17'.
+ *
  * @returns {{ lengthFt: number, qty: number }[]}
  */
 export function mainCornerTrimPack(b) {
   const sites = buildingCornerTrimSites(b);
+  const lengthFt = roundToNearestInch(eaveWallPanelHeightFt(b) + 1);
+
   if (!sites.length) {
-    const eaveH = Number(b?.eaveHeight) || 12;
-    const openCount = ['front', 'back', 'left', 'right'].filter((w) => {
-      const ow = b?.openWalls;
-      return Array.isArray(ow) && ow.includes(w);
-    }).length;
-    const corners = Math.max(2, 4 - Math.floor(openCount / 2));
-    if (eaveH > 16) {
-      const n20 = Math.ceil(corners / 2);
-      return [
-        { lengthFt: 20, qty: n20 },
-        { lengthFt: 16, qty: corners - n20 },
-      ].filter((r) => r.qty > 0);
-    }
-    if (eaveH > 12) {
-      const n16 = Math.ceil(corners / 2);
-      return [
-        { lengthFt: 16, qty: n16 },
-        { lengthFt: 12, qty: corners - n16 },
-      ].filter((r) => r.qty > 0);
-    }
-    return [{ lengthFt: Math.ceil(eaveH + 2 - 1e-9), qty: corners }];
+    const open = new Set(Array.isArray(b?.openWalls) ? b.openWalls : []);
+    const corners = [
+      ['front', 'left'],
+      ['front', 'right'],
+      ['back', 'left'],
+      ['back', 'right'],
+    ].filter(([g, e]) => !(open.has(g) && open.has(e))).length;
+    return corners > 0 ? [{ lengthFt, qty: corners }] : [];
   }
 
+  // A corner that a lean wraps stands only to the LEAN's eave, so it takes the
+  // lean's wall sheet plus the same foot rather than the main building's.
   const byLen = new Map();
-  const tall = [];
-  for (const s of sites) {
-    const h = Number(s.eaveH) || 12;
-    if (h > 16) {
-      byLen.set(20, (byLen.get(20) || 0) + 1);
-    } else if (h > 12) {
-      tall.push(h);
-    } else {
-      const len = Math.ceil(h + 2 - 1e-9);
-      byLen.set(len, (byLen.get(len) || 0) + 1);
-    }
-  }
-  if (tall.length) {
-    const n16 = Math.ceil(tall.length / 2);
-    byLen.set(16, (byLen.get(16) || 0) + n16);
-    byLen.set(12, (byLen.get(12) || 0) + (tall.length - n16));
+  for (const site of sites) {
+    const siteEave = Number(site.eaveH);
+    const len =
+      Number.isFinite(siteEave) && Math.abs(siteEave - (Number(b?.eaveHeight) || 12)) > 0.01
+        ? roundToNearestInch(siteEave + wallPanelBelowFloorIn(b) / 12 + 1)
+        : lengthFt;
+    byLen.set(len, (byLen.get(len) || 0) + 1);
   }
   return [...byLen.entries()]
-    .map(([lengthFt, qty]) => ({ lengthFt, qty }))
-    .filter((r) => r.qty > 0)
-    .sort((a, b) => b.lengthFt - a.lengthFt);
+    .sort((a, c) => c[0] - a[0])
+    .map(([len, qty]) => ({ lengthFt: len, qty }));
 }
+
+/**
+ * Longest gable edge piece Levi will run (ft). 16'6".
+ */
+export const GABLE_EDGE_MAX_PIECE_FT = 16.5;
+
+/**
+ * One rake's worth of gable edge trim (ft): the building's standard roof sheet
+ * plus a foot.
+ *
+ * The rake and the roof sheet lie on the same plane and run the same way —
+ * ridge down to eave — so they are the same length, and Levi orders the trim a
+ * foot longer than the sheet.
+ */
+export function gableEdgeRunFt(b) {
+  return roofPanelCutLengthFt(b) + 1;
+}
+
+/**
+ * Cut one rake into the FEWEST pieces, none longer than 16'6".
+ *
+ * Fewest pieces means fewest seams, which is what Levi asked for. The run is
+ * then split evenly between them rather than taking full-length sticks and
+ * leaving a short tail: two 13'10" pieces beat a 16'6" and an 11'2", because a
+ * seam in the middle of a rake looks deliberate and a stub near the eave does
+ * not.
+ *
+ * @returns {{ lengthFt: number, qty: number }[]}
+ */
+export function packGableEdgeRun(runFt) {
+  const run = Number(runFt) || 0;
+  if (!(run > 0.01)) return [];
+  const pieces = Math.max(1, Math.ceil(run / GABLE_EDGE_MAX_PIECE_FT - 1e-9));
+  const each = roundUpToInch(run / pieces);
+  return [{ lengthFt: each, qty: pieces }];
+}
+
+/** Up to the next whole inch. */
+function roundUpToInch(ft) {
+  return Math.ceil((Number(ft) || 0) * 12 - 1e-9) / 12;
+}
+
 
 /**
  * True when a plain small-shop still needs FJ / SANG eave trim without the
@@ -1134,12 +1361,16 @@ export function mainCornerTrimPack(b) {
  */
 
 /**
- * True when wood frame overhang qualifies for standard-eave benchmark packaging
+ * True when wood frame overhang qualifies for standard-eave PBP matrix packaging
  * (FJ/SANG, trim lap +1, closure +1, skirt door nest −1). Matches
  * includeStandardEaveTrim (≥ 6″).
  */
 export function hasWoodOverhangStandardEave(b) {
-  return (Number(b?.overhangIn) || 0) >= 6;
+  const eave =
+    b?.overhangEaveIn != null && Number.isFinite(Number(b.overhangEaveIn))
+      ? Number(b.overhangEaveIn)
+      : Number(b?.overhangIn) || 0;
+  return eave >= 6;
 }
 
 export function includeStandardEaveTrim(b) {
@@ -1189,7 +1420,7 @@ export function topOfWallPieces(b) {
 
 /**
  * FJ count for standard-eave small shops (wood OH, no full package).
- * ceil(2×(L+W)/10)+2 → Frank 35×50 → 19 (benchmark).
+ * ceil(2×(L+W)/10)+2 → Frank 35×50 → 19 (PBP matrix).
  */
 export function topOfWallPiecesStandardEave(b) {
   const L = Number(b?.length) || 0;
@@ -1199,7 +1430,7 @@ export function topOfWallPiecesStandardEave(b) {
 
 /**
  * SANG / eave-fascia count for standard-eave small shops.
- * ceil(2×(L+W)/10)+4 → Frank 35×50 → 21 (benchmark).
+ * ceil(2×(L+W)/10)+4 → Frank 35×50 → 21 (PBP matrix).
  */
 export function eaveFasciaPiecesStandardEave(b) {
   return topOfWallPieces(b);
@@ -1219,7 +1450,7 @@ export function describePolicyForBuilding(b) {
   const sides = (b?.roofStyle || 'gable') === 'mono' ? 1 : 2;
   const purlinPack = packMainPurlinBoards(rps * sides, L, b);
   const run = purlinMainRunLengthFt(L);
-  const eaveNail = girtIncludeEaveNailer(b);
+  const eaveNail = gableEaveGirtRow(b);
   const pack = girtPackMode(b);
   return {
     orderPackageMode: mode,
@@ -1228,6 +1459,8 @@ export function describePolicyForBuilding(b) {
         ? 'full trim; compact continuous girts'
         : 'full (eave row + per-wall pack)'
       : 'small-shop (no eave row + continuous LF)',
+    /** Gable ends only, and only for scissor / parallel-chord trusses. */
+    girtGableEaveRow: eaveNail,
     girtIncludeEave: eaveNail,
     girtPackMode: pack,
     girtOpeningDeduct: girtOpeningDeduct(b),
@@ -1255,11 +1488,11 @@ export function describePolicyForBuilding(b) {
   };
 }
 
-/** Multi-line policy text for Rules / scorecard UI. */
+/** Multi-line policy text for Rules / policy UI. */
 export function formatPolicySummary(b) {
   const p = describePolicyForBuilding(b);
   const lines = [
-    `Benchmark package: ${p.girtPackage}`,
+    `PBP matrix package: ${p.girtPackage}`,
     `Opening lumber: ${p.openingLumber}`,
     `Girt deduct (openings): −${p.girtOpeningDeduct}`,
     `Purlins: ${p.purlinPack16}@16′ + ${p.purlinPack12}@12′ (run ${p.purlinMainRunFt}′, pad ${p.purlinStationPad}, upgrade ${p.purlinStaggerUpgrade}, mid12 ${p.purlinMid12Stubs}, long12 ${p.purlinLong12Stubs})`,

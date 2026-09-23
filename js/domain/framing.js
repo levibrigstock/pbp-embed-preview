@@ -10,6 +10,7 @@ import {
  roofRise,
  rafterLength,
  isLeanEnclosed,
+ isLeanCantilever,
  leanToRafterLength,
  leanToRoofRise,
  leanToAttachHeight,
@@ -22,22 +23,33 @@ import {
  leanOpenFaceList,
  roundFtToNearestInch,
  isStudFrame,
-} from './types.js?v=20260921freight1';
+} from './types.js?v=20260923houseWrap1';
+import {
+ isWrapLean,
+ wrapFootprint,
+ wrapOuterPostStations,
+ wrapRoofPlanes,
+ wrapHipSegment,
+} from './wrapLean.js?v=20260923frameView1';
+import {
+ leanWingJunctions,
+ clippedWrapFootprint,
+ filterPostsOutsideWings,
+ leanWingTakeoffAdjust,
+} from './leanWingJunction.js?v=20260923frameView1';
 import {
  useFullGirtPackage,
  girtPackMode,
- girtIncludeEaveNailer,
+ gableEaveGirtRow,
  purlinStationPad,
  purlinRowsPerSide,
  panelMetalOverhangIn,
- roofPanelOrderAddInches,
- useMidGable18Demotion,
- isExplicitMidGableKeep20,
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260918dougLean3';
-import { ellBuriedRunOnWall } from './ell.js?v=20260917g';
+} from './productionPolicy.js?v=20260923trim5';
+import { ellBuriedRunOnWall } from './ell.js?v=20260923frameView1';
+import { measureRoofPlane, frameEaveHeightFt } from './measure.js?v=20260923openOff1';
 
 /**
  * Place posts on a wall line, including both ends.
@@ -80,7 +92,10 @@ function keyXZ(x, z, tol = 0.05) {
  */
 export function postHeightAboveGrade(b, x, z, walls = []) {
  const W = b.width;
- const eave = b.eaveHeight;
+ // From GRADE, so a slab lifts the frame rather than eating the headroom: a
+ // 12' building on a 4" slab stands 12'4" out of the ground so it is a true
+ // 12' from the slab to the bottom of a common truss. See measure.js rule 4.
+ const eave = frameEaveHeightFt(b);
  const rise = roofRise(b);
  const wallSet = walls instanceof Set ? walls : new Set(walls);
  const onFront = wallSet.has('front');
@@ -161,13 +176,28 @@ function gridStations(wallLen, spacing) {
  const len = Math.max(0, Number(wallLen) || 0);
  const sp = Math.max(1, Number(spacing) || 10);
  if (len < 0.01) return [0];
- const out = [0];
- for (let u = sp; u < len - 0.05; u += sp) {
- out.push(roundStation(u));
+
+ // Both corners get a post, the field runs at spacing, and any remainder is
+ // SPLIT BETWEEN THE TWO END BAYS.
+ //
+ // Marching from one corner and letting the far end keep the leftover put the
+ // whole remainder in the last bay: a 42' wall came out 10,10,10,10,2. A 2' bay
+ // is a post you buy, a girt run you cannot use and a sheet you cut twice.
+ // Splitting gives 6,10,10,10,6 — no bay over spacing, nothing stunted — and it
+ // reduces to plain spacing when the wall divides evenly.
+ const bays = Math.max(1, Math.ceil(len / sp - 1e-9));
+ if (bays <= 2) {
+ const even = len / bays;
+ const short = [0];
+ for (let i = 1; i < bays; i += 1) short.push(roundStation(i * even));
+ short.push(roundStation(len));
+ return short.filter((u, i) => i === 0 || u > short[i - 1] + 0.02);
  }
- const end = roundStation(len);
- if (out[out.length - 1] < end - 0.05) out.push(end);
- return out;
+ const endBay = (len - (bays - 2) * sp) / 2;
+ const out = [0, roundStation(endBay)];
+ for (let i = 1; i <= bays - 2; i += 1) out.push(roundStation(endBay + i * sp));
+ out.push(roundStation(len));
+ return out.filter((u, i) => i === 0 || u > out[i - 1] + 0.02);
 }
 
 /** Door types that need 6x6 posts at both jambs (king posts). */
@@ -216,6 +246,28 @@ export function postBlocksOpening(alongWallFt, opening, eps = 0.08) {
  * True if along-wall station lands on the regular post grid (or a corner).
  * A door jamb that falls on a grid post reuses that post — no extra JambPost.
  */
+/** gridStations is pure in (wallLen, spacing); isOnPostGrid asks it a lot. */
+const gridStationCache = new Map();
+function cachedGridStations(wallLen, spacing) {
+ const key = `${wallLen}|${spacing}`;
+ let v = gridStationCache.get(key);
+ if (v === undefined) {
+ v = gridStations(wallLen, spacing);
+ gridStationCache.set(key, v);
+ }
+ return v;
+}
+
+/**
+ * True when this position is one of the wall's ACTUAL post stations.
+ *
+ * Not the same as "a multiple of the spacing". A wall splits its remainder
+ * between the two end bays, so a 55' wall at 10' o.c. stands posts at 0, 7.5,
+ * 17.5, 27.5, 37.5, 47.5, 55 — and only the corners are multiples of 10. This
+ * compared against multiples, so on any wall that does not divide evenly every
+ * real post answered "off grid", and a door jamb landing on one was billed as
+ * a JambPost instead of the wall post it actually is.
+ */
 export function isOnPostGrid(alongWallFt, wallLen, spacing, eps = 0.08) {
  const u = Number(alongWallFt);
  const L = Number(wallLen) || 0;
@@ -223,9 +275,10 @@ export function isOnPostGrid(alongWallFt, wallLen, spacing, eps = 0.08) {
  if (!Number.isFinite(u)) return false;
  if (u <= eps || u >= L - eps) return true; // corners
  if (!(s > 0)) return false;
- const n = Math.round(u / s);
- const g = n * s;
- return Math.abs(g - u) <= eps && g >= -eps && g <= L + eps;
+ for (const g of cachedGridStations(L, s)) {
+ if (Math.abs(g - u) <= eps) return true;
+ }
+ return false;
 }
 
 /**
@@ -243,27 +296,47 @@ export function isOnPostGrid(alongWallFt, wallLen, spacing, eps = 0.08) {
  *  - If a post lands in the window RO, move it to the nearer jamb only (one side);
  *    the other side stays stud-framed
  */
+/**
+ * A wall post this close to a door jamb is dropped — you cannot stand two
+ * posts 17" apart, and the one that survives is the jamb, because the rough
+ * opening has to stay exactly where the door is.
+ */
+export const JAMB_CROWD_IN = 17;
+
 function stationsWithOpeningAdjustments(wallLen, spacing, openingsOnWall, opts = {}) {
  const jambEps = 0.08;
  const stations = new Set(gridStations(wallLen, spacing));
  /** Off-grid door jambs only — listed as JambPost on the order list */
  const jambSet = new Set();
- /** Grid posts cleared by OH/slider ROs — benchmark still orders short header stubs @ eaveStock−2. */
+ /** Grid posts cleared by OH/slider ROs — PBP matrix still orders short header stubs @ eaveStock−2. */
  const stubSet = new Set();
- /** Only eave walls: drop grid posts just outside RO near off-grid jambs (benchmark 35×55). */
- const joinNearJambs = opts.eaveWall === true;
+ // A jamb never deletes a nearby grid post — you keep both. Dropping the grid
+ // post to close a 3' gap left a 13' bay either side of every wide eave door,
+ // silently over-running the post spacing. It came from one PBP matrix (35×55)
+ // and cost structure everywhere else.
+ const joinNearJambs = false;
 
  const clamp = (u) => roundStation(Math.max(0, Math.min(wallLen, u)));
 
- /** Ensure a post at jamb; tag JambPost only if not already a grid station.
- * Near-grid jambs (≤1″) snap to the grid so float offsets don't invent JambPosts.
- */
+ /**
+  * Ensure a post at this jamb, tagged JambPost only when it is not already a
+  * station.
+  *
+  * The jamb sits at the door's TRUE edge and is not moved. Snapping it outward
+  * onto a nearby post would put extra space inside the rough opening, and the
+  * opening has to stay where the door is. A wall post that ends up too close
+  * is dealt with the other way round — it is dropped (see dropCrowdedPosts).
+  *
+  * The only movement here is a 1" tolerance, so a float offset that lands a
+  * hair off an existing station does not invent a JambPost beside it.
+  */
  const ensureJamb = (jRaw) => {
  let j = jRaw;
- const s = Number(spacing) || 10;
- if (s > 0 && j > jambEps && j < wallLen - jambEps) {
- const g = Math.round(j / s) * s;
- if (Math.abs(g - j) <= 1 / 12) j = clamp(g);
+ for (const u of stations) {
+ if (Math.abs(u - j) <= 1 / 12) {
+ j = clamp(u);
+ break;
+ }
  }
  stations.add(j);
  if (!isOnPostGrid(j, wallLen, spacing, jambEps)) {
@@ -326,6 +399,27 @@ function stationsWithOpeningAdjustments(wallLen, spacing, openingsOnWall, opts =
  }
  }
 
+ // Crowded posts: a wall post within JAMB_CROWD_IN of a door jamb is dropped.
+ // You cannot stand two posts 17" apart, and the one that survives is the jamb,
+ // because the rough opening has to stay exactly where the door is.
+ //
+ // This is NOT the old joinNearJambs, which dropped a grid post up to HALF A
+ // BAY from a jamb and left a 13' run either side of every wide door. Seventeen
+ // inches cannot open a bay by more than seventeen inches.
+ {
+ const crowd = JAMB_CROWD_IN / 12 + 1e-9;
+ for (const jRaw of jambSet) {
+ const j = Number(jRaw);
+ if (!Number.isFinite(j)) continue;
+ for (const u of [...stations]) {
+ if (u <= jambEps || u >= wallLen - jambEps) continue; // corners stay
+ if (jambSet.has(roundStation(u))) continue; // never drop another jamb
+ if (Math.abs(u - j) <= 1e-6) continue; // itself
+ if (Math.abs(u - j) <= crowd) stations.delete(u);
+ }
+ }
+ }
+
  // Stub-bay elimination on eave walls (layout-general):
  // When an off-grid OH/slider jamb sits within half a design bay of a line post,
  // the jamb carries that bay — drop the non-corner grid post. Scales with spacing
@@ -368,7 +462,7 @@ function stationsWithOpeningAdjustments(wallLen, spacing, openingsOnWall, opts =
  }
 
  // Long eave (L ≥ 60′), 3+ independent wide doors: half-bay join can clear
- // every intermediate line post so the door wall is 100% JambPost. benchmark still
+ // every intermediate line post so the door wall is 100% JambPost. PBP matrix still
  // lists one slid column as Post (60×12 equal-space 3×10′ → 10@16 + 5 Jamb,
  // not 9+6). Mid-length eaves (35×55 L=55) keep full JambPost pairs (6@16).
  // Only when jambs == 2×doors (no shared jambs) and no regular intermediate remains.
@@ -490,7 +584,7 @@ export function generateMainPosts(b) {
  }
  return true;
  });
- // Near-peak high posts (benchmark A×2 @22′): first grid in from each corner.
+ // Near-peak high posts (PBP matrix A×2 @22′): first grid in from each corner.
  for (const uKeep of [s, len - s]) {
  if (uKeep <= 0.05 || uKeep >= len - 0.05) continue;
  // Skip if inside an RO
@@ -536,7 +630,7 @@ export function generateMainPosts(b) {
  }
  }
  }
- // OH header stubs: grid posts cleared by wide OH/slider ROs. benchmark still
+ // OH header stubs: grid posts cleared by wide OH/slider ROs. PBP matrix still
  // orders eaveStock−2 CCA (Frank 12′ eave → 2@14′). Skip low eaves (stock
  // <16′) so 60×60×10 Post14 golden stays exact.
  for (const u of stubSet) {
@@ -574,6 +668,19 @@ export function generateMainPosts(b) {
  for (const uRaw of [Number(o.offset), Number(o.offset) + Number(o.width)]) {
  if (!Number.isFinite(uRaw)) continue;
  const u = Math.max(0, Math.min(wallLen, uRaw));
+ // The jamb goes at the door's true edge. Any wall post crowded within
+ // JAMB_CROWD_IN of it is removed instead — same rule as the station pass,
+ // repeated here because this runs after the safety strip may have put one
+ // back.
+ for (const [qk, q] of [...map.entries()]) {
+ if ((q?.primaryWall || null) !== wall) continue;
+ if (q.ohHeaderStub || q.openingJamb) continue;
+ const qu = Number(q?.alongFt);
+ if (!Number.isFinite(qu)) continue;
+ if (qu <= 0.08 || qu >= wallLen - 0.08) continue; // corners stay
+ const d = Math.abs(qu - u);
+ if (d > 1e-6 && d <= JAMB_CROWD_IN / 12 + 1e-9) map.delete(qk);
+ }
  const pos = wallOffsetToXZ(b, wall, u);
  const k = keyXZ(pos.x, pos.z);
  const extraJamb = !isOnPostGrid(u, wallLen, s);
@@ -592,7 +699,7 @@ export function generateMainPosts(b) {
  const e = map.get(k);
  e.walls.add(wall);
  // Do not force openingJamb false → true. stationsWithOpeningAdjustments may
- // intentionally leave a slid column as Post on long multi-OH eaves (benchmark 10@16+5 Jamb).
+ // intentionally leave a slid column as Post on long multi-OH eaves (PBP matrix 10@16+5 Jamb).
  if (extraJamb && e.openingJamb) {
  e.alongFt = u;
  e.primaryWall = wall;
@@ -614,7 +721,7 @@ export function generateMainPosts(b) {
  );
  const isJamb = !!p.openingJamb;
  const ohHeaderStub = !!p.ohHeaderStub;
- // Walk/window jamb on eave walls only: benchmark step-down vs wall posts
+ // Walk/window jamb on eave walls only: PBP matrix step-down vs wall posts
  // (Prater left walk 14′ vs eave 16′). Do not step gable-end jambs (Levi).
  let walkJamb = false;
  const eaveWall = p.primaryWall === 'left' || p.primaryWall === 'right';
@@ -670,7 +777,7 @@ export function generateMainPosts(b) {
  }
  
  // Raised-heel partial shed: gable jambs with rise ≳1.75′ bump 22→24
- // (Doug benchmark @24 with exact-24 keep). Eave-clamped path otherwise sticks @22′.
+ // (Doug PBP matrix @24 with exact-24 keep). Eave-clamped path otherwise sticks @22′.
  if (
   heel > 0 &&
   hasPartialEnclosedShedLean(b) &&
@@ -741,9 +848,344 @@ function snapToGrid(value, spacing, max) {
  * - Main-wall posts along the attachment span are marked sharedWithLeanTo (not double-counted).
  * - Optional snapToPosts aligns lean ends to main post grid.
  * - Enclosed: girts on outer + both ends. Open: posts + roof framing only.
+ * - Cantilever: zero lean posts; roof framing + metal only (ledger / rafters / purlins).
  * - Roof always: purlins, outer sub-fascia, attachment ledger, transition flash length.
  */
+
+/**
+ * Wrap-around lean-to: outer L posts (shared corner once), ledgers on both
+ * host walls, materials for two shed legs + hip. Open porch v1 — no wall metal.
+ * Enclosed wrap walls: TODO.
+ */
+export function generateWrapLeanPosts(b, lean, mainPosts = []) {
+ const junctions = leanWingJunctions(b, lean);
+ const clip = clippedWrapFootprint(b, lean, junctions);
+ const fp = clip.footprint;
+ const embedFt = b.postDepthFt ?? 3;
+ let posts = [];
+ const enclosed = false; // open porch v1
+ const cantilever = false;
+ const outerH = Number(lean.eaveHeight) || 10;
+ const attachH = leanToAttachHeight(b, lean);
+ const sp = Number(lean.postSpacing) > 0 ? Number(lean.postSpacing) : 10;
+
+ // Stations from the clipped footprint so outer L stops at the wing face.
+ const stationLean = clip.clipped
+  ? { ...lean, lengthA: fp.lengthA, lengthB: fp.lengthB, length: undefined }
+  : lean;
+ const { posts: stations } = wrapOuterPostStations(b, stationLean, sp);
+ for (const st of stations) {
+ const pick = pickPostStockLength(outerH, embedFt, POST_STOCK_LENGTHS, {
+ building: b,
+ });
+ posts.push({
+ x: st.x,
+ z: st.z,
+ walls: [fp.wallA, fp.wallB],
+ kind: 'leanto',
+ leanToId: lean.id,
+ face: st.face === 'corner' ? 'corner' : 'outer',
+ wrapFace: st.face,
+ shared: false,
+ openingJamb: false,
+ alongFt: st.alongLf,
+ heightAboveGrade: outerH,
+ embedFt,
+ requiredFt: pick.requiredFt,
+ totalLengthFt: pick.stockFt,
+ stockFt: pick.stockFt,
+ gradeBufferApplied: pick.gradeBufferApplied,
+ fieldCutFt: pick.fieldCutFt || null,
+ });
+ }
+
+ // Mark main posts along both attach spans as shared
+ const sharedMain = [];
+ const markShared = (wall, start, end) => {
+ for (const mp of mainPosts) {
+ if (!mp.walls?.includes(wall)) continue;
+ let along = 0;
+ if (wall === 'front' || wall === 'back') along = mp.x;
+ else along = mp.z;
+ if (along >= start - 0.1 && along <= end + 0.1) {
+ mp.sharedWithLeanTo = mp.sharedWithLeanTo || [];
+ if (!mp.sharedWithLeanTo.includes(lean.id)) mp.sharedWithLeanTo.push(lean.id);
+ mp.kind = mp.kind === 'main' ? 'main-shared' : mp.kind;
+ sharedMain.push(mp);
+ }
+ }
+ };
+ // Span starts depend on corner — reuse footprint attach endpoints
+ const alongOf = (wall, p) =>
+ wall === 'front' || wall === 'back' ? p.x : p.z;
+ const a0 = alongOf(fp.wallA, fp.attachA.start);
+ const a1 = alongOf(fp.wallA, fp.attachA.end);
+ markShared(fp.wallA, Math.min(a0, a1), Math.max(a0, a1));
+ const b0 = alongOf(fp.wallB, fp.attachB.start);
+ const b1 = alongOf(fp.wallB, fp.attachB.end);
+ markShared(fp.wallB, Math.min(b0, b1), Math.max(b0, b1));
+
+ posts = filterPostsOutsideWings(posts, junctions);
+ const materials = computeWrapLeanMaterials(b, lean, fp, junctions);
+ materials.postCount = posts.length;
+ materials.cornerPostCount = posts.filter((p) => p.face === 'corner').length;
+
+ // Legacy single-rect fields: use leg A as primary for callers that expect them
+ return {
+ posts,
+ sharedMain,
+ outerStart: fp.outerL.freeEndA,
+ outerEnd: fp.outerL.outerCorner,
+ innerStart: fp.attachA.end,
+ innerEnd: fp.attachA.start,
+ length: fp.lengthA + fp.lengthB,
+ depth: fp.depth,
+ offset: 0,
+ enclosed,
+ cantilever,
+ materials,
+ wrap: fp,
+ isWrap: true,
+ leanWingJunctions: junctions,
+ };
+}
+
+/**
+ * Materials for wrap lean: two shed legs, hip once, no wall metal (open v1).
+ */
+export function computeWrapLeanMaterials(b, lean, fpIn, junctionsIn) {
+ const junctions = junctionsIn || leanWingJunctions(b, lean);
+ const clip = fpIn
+  ? {
+     footprint: fpIn,
+     junctions,
+     clipped:
+      Math.abs(fpIn.lengthA - (Number(lean.lengthA) || fpIn.lengthA)) > 0.05 ||
+      Math.abs(fpIn.lengthB - (Number(lean.lengthB) || fpIn.lengthB)) > 0.05 ||
+      clippedWrapFootprint(b, lean, junctions).clipped,
+    }
+  : clippedWrapFootprint(b, lean, junctions);
+ const fp = clip.footprint;
+ // Always derive roof planes from the footprint lengths we will bill.
+ const planesLean = {
+  ...lean,
+  lengthA: fp.lengthA,
+  lengthB: fp.lengthB,
+  length: undefined,
+ };
+ const planes = wrapRoofPlanes(b, planesLean);
+ const metalOh = leanToOverhangFt(lean, b);
+ const purlinSp = (b.purlinSpacingIn || 24) / 12;
+ const attachH = leanToAttachHeight(b, lean);
+ const outerH = Number(lean.eaveHeight) || 10;
+ const rise = planes.rise;
+ const rafter = planes.rafter;
+ const lengthA = fp.lengthA;
+ const lengthB = fp.lengthB;
+ const depth = fp.depth;
+
+ // Purlins: rows across depth per leg; run along each outer+attach length
+ const pad = 0; // open
+ const purlinRowsPerLeg = Math.max(2, Math.ceil((depth + metalOh) / purlinSp) + pad);
+ const purlinRows = purlinRowsPerLeg * 2;
+ // Run lengths: leg A along (lenA+depth), leg B along (lenB+depth) — bill separately as sum
+ const purlinRunFt = lengthA + depth; // representative; Lf uses both
+ const purlinLf =
+ purlinRowsPerLeg * (lengthA + depth) + purlinRowsPerLeg * (lengthB + depth);
+ const purlinExtra12 = Math.max(
+ 0,
+ Math.ceil((lengthA + lengthB) / 10 - 1e-9),
+ );
+
+ // Ledgers on both host walls (2-ply)
+ const ledgerPlies = 2;
+ const ledgerLf = ledgerPlies * (lengthA + lengthB);
+ const ledgerSize =
+ lean.ledgerSize === '2x6' || lean.ledgerSize === '2x12'
+ ? lean.ledgerSize
+ : '2x10';
+
+ // Outer bearer along L (2-ply), corner not doubled
+ const outerBearerPlies = 2;
+ const outerBearerLf = outerBearerPlies * fp.outerL.totalLf;
+ const outerBearerSize = ['2x6', '2x8', '2x10', '2x12'].includes(lean.rafterBearerSize)
+ ? lean.rafterBearerSize
+ : b.trussCarrierSize || '2x10';
+
+ // Hip rafter / beam billed once
+ const hip = wrapHipSegment(b, lean, { attachH, eaveH: outerH });
+ const hipRafterLf = hip.slopeLf;
+
+ // Roof panels: two legs, coverage along each outer run
+ const coverage = 3;
+ const roofAlongA = lengthA + depth;
+ const roofAlongB = lengthB + depth;
+ const roofPanelQty =
+ Math.ceil(roofAlongA / coverage) + Math.ceil(roofAlongB / coverage);
+ const metalInRaw = lean.metalOverhangIn != null ? Number(lean.metalOverhangIn) : 3;
+ const metalOhOrderFt =
+ (Number.isFinite(metalInRaw) && metalInRaw > 0 ? metalInRaw : 3) / 12;
+ // Measured, not padded — see measure.js. The plane is the wrap depth, the
+ // metal drip rides along that plane, and the cut rounds up to the next inch.
+ const wrapPlane = measureRoofPlane(null, {
+ pitch: Number(lean.pitch) || 3,
+ runFt: depth,
+ framedOhFt: 0,
+ metalOhFt: metalOhOrderFt,
+ });
+ const leanOrderSlope = wrapPlane.structuralSlopeFt;
+ const roofPanelLen = wrapPlane.panelCutFt;
+
+ // Open porch: no wall metal / girts / base / corners
+ const wallPanelLf = 0;
+ const girtLf = 0;
+ const baseLf = 0;
+ const cornerCount = 0;
+ const wainscotLf = 0;
+
+ const transitionLf = lengthA + lengthB;
+ const eaveEdgeLf = fp.outerL.totalLf;
+ // Two free-end rakes (not the hip) × rafter
+ const rakeLf = 2 * rafter;
+ const ridgeLf = hipRafterLf; // hip billed as ridge-style trim length
+
+ const adj = leanWingTakeoffAdjust(b, lean, junctions);
+ // Clipped footprint already drops roof SF past the wing face. junctionRunFt
+ // bills the sidewall / valley tie-in along that face.
+ const roofSqFt = Math.max(0, planes.roofSqFt);
+ const planAreaSqFt = Math.max(0, planes.planAreaSqFt);
+ const junctionRunFt = adj.junctionRunFt || 0;
+ const sidewallFlashLf = adj.sidewallFlashLf || 0;
+ const valleyLf = adj.valleyLf || 0;
+
+ return {
+ enclosed: false,
+ isGable: false,
+ isWrap: true,
+ length: lengthA + lengthB,
+ lengthA,
+ lengthB,
+ depth,
+ outerH,
+ attachH,
+ rise,
+ rafter,
+ metalOh,
+ overhangIn: lean.overhangIn ?? 0,
+ metalOverhangIn: lean.metalOverhangIn ?? 3,
+ openFaces: ['outer', 'leftEnd', 'rightEnd'],
+ openOuter: true,
+ openLeft: true,
+ openRight: true,
+ wainscotHeightFt: 0,
+ wainscotLf,
+ girtLevels: [],
+ purlinRows,
+ purlinRunFt,
+ purlinExtra12,
+ purlinLf,
+ ledgerPlies,
+ ledgerLf,
+ ledgerSize,
+ outerBearerPlies,
+ outerBearerLf,
+ outerBearerSize,
+ subFasciaLf: 0,
+ cantileverRafterQty: 0,
+ cantileverRafterLenFt: 0,
+ cantileverRafterSize: '2x8',
+ cantileverRafterSpacingFt: 5,
+ girtRows: 0,
+ girtLf,
+ skirtLf: 0,
+ roofPanelQty: Math.max(1, roofPanelQty),
+ roofPanelLen,
+ roofSides: 2,
+ wallPanelLf,
+ wallPanelLen: outerH + 1,
+ transitionLf,
+ eaveEdgeLf,
+ rakeLf,
+ ridgeLf,
+ hipRafterLf,
+ cornerCount,
+ baseLf,
+ ceilingLiner: lean.ceilingLiner === 'yes' || lean.ceilingLiner === true,
+ ceilingLinerColor: lean.ceilingLinerColor || 'AR',
+ linerAreaSqFt:
+ lean.ceilingLiner === 'yes' || lean.ceilingLiner === true ? roofSqFt : 0,
+ wallLiner: false,
+ wallLinerColor: lean.wallLinerColor || 'AR',
+ roofSqFt,
+ planAreaSqFt,
+ junctionRunFt,
+ sidewallFlashLf,
+ valleyLf,
+ leanWingJunctionCount: junctions.length,
+ cornerPostCount: 1,
+ };
+}
+
+
+/**
+ * Shed lean rafter station count (ends inclusive @ spacing) — same basis as
+ * cantileverRafterQty / joist hanger auto qty.
+ */
+export function shedLeanRafterStationCount(lengthFt, spacingFt = 5) {
+ const length = Math.max(0, Number(lengthFt) || 0);
+ const sp = [2, 4, 5].includes(Number(spacingFt)) ? Number(spacingFt) : 5;
+ if (!(length > 0.01)) return 0;
+ return gridStations(length, sp).length;
+}
+
+/**
+ * Resolved lean length along the host wall (ft), matching generateLeanToPosts.
+ */
+export function resolvedLeanLengthFt(b, lean) {
+ if (!b || !lean || isWrapLean(lean)) return 0;
+ const wallLen = wallLength(b, lean.wall);
+ let offset = Number(lean.offset) || 0;
+ let length =
+ lean.length > 0 ? Math.min(Number(lean.length) || 0, wallLen - offset) : wallLen - offset;
+ if (lean.snapToPosts === true) {
+ const end = offset + length;
+ offset = snapToGrid(offset, b.postSpacing, wallLen);
+ const endSnap = snapToGrid(end, b.postSpacing, wallLen);
+ length = Math.max(b.postSpacing, endSnap - offset);
+ if (offset + length > wallLen) length = wallLen - offset;
+ }
+ return Math.max(0, length);
+}
+
+/**
+ * Auto joist-hanger qty for a shed lean (= rafter stations). 0 for gable/wrap.
+ */
+export function shedLeanJoistHangerAutoQty(b, lean) {
+ if (!lean || isWrapLean(lean)) return 0;
+ if ((lean.roofStyle || 'shed') === 'gable') return 0;
+ const length = resolvedLeanLengthFt(b, lean);
+ const depth = Number(lean.depth) || 0;
+ if (!(length > 0.01) || !(depth > 0.01)) return 0;
+ const sp = [2, 4, 5].includes(Number(lean.rafterSpacing))
+ ? Number(lean.rafterSpacing)
+ : 5;
+ return shedLeanRafterStationCount(length, sp);
+}
+
+/**
+ * Bill qty: positive joistHangerQty override, else auto rafter match.
+ */
+export function shedLeanJoistHangerBillQty(lean, autoQty) {
+ if (lean?.joistHangers !== true) return 0;
+ const override = Number(lean.joistHangerQty);
+ if (Number.isFinite(override) && override > 0) return Math.round(override);
+ return Math.max(0, Math.round(Number(autoQty) || 0));
+}
+
 export function generateLeanToPosts(b, lean, mainPosts = []) {
+ if (isWrapLean(lean)) {
+ return generateWrapLeanPosts(b, lean, mainPosts);
+ }
  const wallLen = wallLength(b, lean.wall);
  // Lean post grid is independent of main: default 10' o.c. (editable per lean)
  const s = Number(lean.postSpacing) > 0 ? Number(lean.postSpacing) : 10;
@@ -762,6 +1204,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  const depth = lean.depth;
  const embedFt = b.postDepthFt ?? 3; // Levi PDF: post hole 3' (types default 3)
  const posts = [];
+ const cantilever = isLeanCantilever(lean);
  const enclosed = isLeanEnclosed(lean);
 
  let outerStart, outerEnd, innerStart, innerEnd;
@@ -789,16 +1232,17 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
 
  // Outer eave posts — true postSpacing o.c. (default 10'), same grid as main.
  // Open / carport leans keep intermediate posts to carry the roof.
+ // Cantilever leans skip this entire outer grid (roof hangs off main wall).
  // e.g. 14' lean @ 10' → stations 0, 10, 14 (not just corners).
  // Dual enclosed eave wings: outer posts order at MAIN eave stock (Mark EXT-1/3
  // → 18′), apply OH jamb packing, and add one short 14′ post per wide door.
  const dualEave = hasDualFullEnclosedEaveLeans(b);
  // Raised-heel partial shed lean (Doug): outer posts include main heel → 18′
- // nail-lam (benchmark 3@18). Full-length / dual-eave leans keep prior ladder.
+ // nail-lam (PBP matrix 3@18). Full-length / dual-eave leans keep prior ladder.
  const mainHeel = Math.max(0, Number(b.heelHeightFt) || 0);
  const leanHeel =
   !dualEave && mainHeel > 0 && hasPartialEnclosedShedLean(b) ? mainHeel : 0;
- {
+ if (!cantilever) {
  const outerOpens = leanFaceOpenings(b, lean, 'outer');
  const adj =
  outerOpens.length > 0
@@ -810,7 +1254,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  const jambSet = adj.jambSet;
  const dx = outerEnd.x - outerStart.x;
  const dz = outerEnd.z - outerStart.z;
- // Dual wings: benchmark nails lean outers at main eave package length.
+ // Dual wings: PBP matrix nails lean outers at main eave package length.
  const outerOrderH = dualEave
  ? Number(b.eaveHeight) || Number(lean.eaveHeight) || 12
  : Number(lean.eaveHeight) || 10;
@@ -843,7 +1287,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  fieldCutFt: pick.fieldCutFt || null,
  });
  }
- // benchmark EXT-1: one short 14′ post per wide OH on multi-door lean outers
+ // PBP matrix EXT-1: one short 14′ post per wide OH on multi-door lean outers
  // (cut ~4′4″ above header / pier — stock still 14′).
  if (dualEave) {
  const wideDoors = outerOpens.filter(
@@ -911,7 +1355,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  if (endPosts.length > 0) {
  sideH = (lean.eaveHeight + attachH) / 2;
  // Raised-heel partial shed: end posts order just under attach (no heel)
- // so mid-depth stations land on 20′ (Doug benchmark 2@20) not average→18′.
+ // so mid-depth stations land on 20′ (Doug PBP matrix 2@20) not average→18′.
  if (leanHeel > 0) {
   sideH = Math.max(Number(lean.eaveHeight) || 0, attachH - 1);
  }
@@ -955,7 +1399,7 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  }
 
  // Deep gable-extension (Jim 43′ wing): interior post grid along depth × length
- // so perma-column count approaches benchmark ~49–51 (perimeter alone under-orders).
+ // so perma-column count approaches PBP matrix ~49–51 (perimeter alone under-orders).
  if (
   enclosed &&
   !dualEave &&
@@ -1025,10 +1469,29 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  }
  }
 
+ const junctions = leanWingJunctions(b, lean);
+ const postsKept = filterPostsOutsideWings(posts, junctions);
  const materials = computeLeanToMaterials(b, lean, { length, depth, enclosed });
+ if (junctions.length && materials) {
+  const adj = leanWingTakeoffAdjust(b, lean, junctions);
+  const slope = Math.max(materials.rafter / Math.max(depth, 0.01), 1);
+  materials.planAreaSqFt = Math.max(
+   0,
+   (Number(materials.planAreaSqFt) || length * depth) - adj.buriedPlanSqFt,
+  );
+  materials.roofSqFt = Math.max(
+   0,
+   (Number(materials.roofSqFt) || materials.planAreaSqFt * slope) -
+    adj.buriedPlanSqFt * slope,
+  );
+  materials.junctionRunFt = adj.junctionRunFt;
+  materials.sidewallFlashLf = adj.sidewallFlashLf;
+  materials.valleyLf = adj.valleyLf;
+  materials.postCount = postsKept.length;
+ }
 
  return {
- posts,
+ posts: postsKept,
  sharedMain,
  outerStart,
  outerEnd,
@@ -1038,18 +1501,23 @@ export function generateLeanToPosts(b, lean, mainPosts = []) {
  depth,
  offset,
  enclosed,
+ cantilever,
  materials,
+ leanWingJunctions: junctions,
  };
 }
 
 /**
  * Accurate lumber / metal quantity model for one lean-to.
- * Roof always; walls only when enclosed.
+ * Roof always; walls only when enclosed (cantilever = roof only).
  */
 export function computeLeanToMaterials(b, lean, dims) {
+ if (isWrapLean(lean)) {
+ return computeWrapLeanMaterials(b, lean);
+ }
  const length = dims.length;
  const depth = dims.depth;
- const enclosed = dims.enclosed ?? isLeanEnclosed(lean);
+ const enclosed = (dims.enclosed ?? isLeanEnclosed(lean)) && !isLeanCantilever(lean);
  const girtSp = (b.girtSpacingIn || 24) / 12;
  const purlinSp = (b.purlinSpacingIn || 24) / 12;
  const metalOh = leanToOverhangFt(lean, b);
@@ -1059,13 +1527,14 @@ export function computeLeanToMaterials(b, lean, dims) {
  const attachH = leanToAttachHeight(b, lean);
  const outerH = Number(lean.eaveHeight) || 10;
  const ceilingLiner = lean.ceilingLiner === 'yes' || lean.ceilingLiner === true;
+ const wallLiner = lean.wallLiner === 'yes' || lean.wallLiner === true;
 
  // --- Lean roof purlins (production order list — same 2x4 Purlin package as main) ---
  // Shed: rows run along attachment length; count across depth + metal OH.
  // 8' deep @ 2' + 3" OH → ceil(8.25/2)+1 = 6 rows × 80' → packs into +30 of 16'
  // (main 128@16 + lean 30@16 = 158@16 — matches production Job Review).
  // Gable lean (ridge out from wall): 1 row per slope along lean length + ridge stubs.
- // benchmark 60×12+14′ gable lean: main 118/27 + lean 2@16 + 3@12 → 120/30.
+ // PBP matrix 60×12+14′ gable lean: main 118/27 + lean 2@16 + 3@12 → 120/30.
  let purlinRows;
  /** Run length each purlin board covers (ft). */
  let purlinRunFt = length;
@@ -1082,13 +1551,13 @@ export function computeLeanToMaterials(b, lean, dims) {
   purlinRows = rowsPerSlope * 2;
   purlinRunFt = depth;
   // End/ridge stubs on wing runs. Long depth (≳32′) also adds one 12′ stub
-  // per station (Jim 43′×24 rows → +24 → Purlin12 56→80 toward benchmark).
+  // per station (Jim 43′×24 rows → +24 → Purlin12 56→80 toward PBP matrix).
   purlinExtra12 = Math.max(3, Math.ceil(purlinRows / 4));
   if (depth > 32) purlinExtra12 += purlinRows;
  } else if (isGable) {
   purlinRows = 2; // one purlin row per slope
   purlinRunFt = length;
-  purlinExtra12 = 3; // benchmark peak/ridge station stubs
+  purlinExtra12 = 3; // PBP matrix peak/ridge station stubs
  } else {
   // Enclosed leans: +1 station pad (Mark dual → 10 rows / Levi shed).
   // Open leans: no pad + 16+12+12 pack + L/10 edge stubs (Prater → 6+4).
@@ -1096,7 +1565,7 @@ export function computeLeanToMaterials(b, lean, dims) {
   purlinRows = Math.max(2, Math.ceil((depth + metalOh) / purlinSp) + pad);
   purlinRunFt = length;
   if (!enclosed) purlinExtra12 = Math.max(0, Math.ceil(length / 10 - 1e-9));
-  // Partial enclosed shed: benchmark adds short 12′ stations on the lean run
+  // Partial enclosed shed: PBP matrix adds short 12′ stations on the lean run
   // (Doug Purlin12 67→73). Full-length enclosed sheds (Levi) skip.
   else if (hasPartialEnclosedShedLean(b)) {
    purlinExtra12 = Math.max(3, Math.ceil(length / 4) + 1);
@@ -1123,6 +1592,41 @@ export function computeLeanToMaterials(b, lean, dims) {
  : b.trussCarrierSize || '2x10';
  // Back-compat alias for callers still reading subFasciaLf
  const subFasciaLf = 0;
+
+ // --- Cantilever spanning rafters: 2x8 @ 5' o.c. along lean length ---
+ // Open/enclosed leans keep posts (no takeoff rafter line). Cantilever hangs
+ // from the main-wall ledger out to the outer bearer — bill one 2x8 per station.
+ // Count matches gridStations / truss o.c.: ends inclusive (floor(L/sp)+1, min 2
+ // when length > 0 so both ends exist for short leans).
+ // Rafters on EVERY shed lean, not only cantilevers.
+ //
+ // scene.js has always DRAWN rafters on open and enclosed sheds — at lean post
+ // spacing, which is its own invention — while the takeoff billed them only for
+ // cantilevers. So the model showed framing the material list never carried,
+ // and a shed lean shipped with no rafters on the order at all.
+ //
+ // A gable extension is excluded: that is a wing and it frames with trusses.
+ const cantilever = isLeanCantilever(lean);
+ const isShed = (lean.roofStyle || 'shed') !== 'gable';
+ const cantileverRafterSpacingFt = [2, 4, 5].includes(Number(lean.rafterSpacing))
+  ? Number(lean.rafterSpacing)
+  : 5;
+ // Default shed rafters stay 2x8; when joist hangers are on, lumber follows
+ // the operator's hanger size (2x8|2x10) so hangers match the stock.
+ const hangersOn = lean.joistHangers === true;
+ const hangerSize = ['2x8', '2x10'].includes(lean.joistHangerSize)
+  ? lean.joistHangerSize
+  : '2x8';
+ const cantileverRafterSize = hangersOn ? hangerSize : '2x8';
+ let cantileverRafterQty = 0;
+ let cantileverRafterLenFt = 0;
+ if (isShed && length > 0.01 && depth > 0.01) {
+  // Ends inclusive: a rafter at each end of the lean, the rest on centre.
+  cantileverRafterQty = gridStations(length, cantileverRafterSpacingFt).length;
+  // Slope length incl. lean overhang policy (same as roof/rake helpers).
+  cantileverRafterLenFt = rafter;
+ }
+ void cantilever;
 
  // Open faces on enclosed lean (drive-through) — skip metal/girts/base on those faces
  const openOuter = isLeanFaceOpen(lean, 'outer');
@@ -1176,12 +1680,15 @@ export function computeLeanToMaterials(b, lean, dims) {
  // Order cut: metal drip OH + short add, nearest inch.
  // Mark/Prater (square-eave main, overhangIn 0): metal only → 16'7" / 10'6".
  // Wood-frame OH mains (Pulver 12″+3″): inherit main frame OH on shed lean so
- // 8'×4/12 → 9'11" (SmartBuild), not depth-only 8'7".
+ // 8'×4/12 → 9'11" (Job Review), not depth-only 8'7".
  // Gable-extension: always include wood frame OH (Jim wing ~20'5").
  const metalInRaw = lean.metalOverhangIn != null ? Number(lean.metalOverhangIn) : 3;
  const metalOhOrderFt =
  (Number.isFinite(metalInRaw) && metalInRaw > 0 ? metalInRaw : 3) / 12;
- const mainFrameIn = Number(b.overhangIn) || 0;
+ const mainFrameIn =
+  b.overhangEaveIn != null && Number.isFinite(Number(b.overhangEaveIn))
+   ? Number(b.overhangEaveIn)
+   : Number(b.overhangIn) || 0;
  const leanFrameIn = Number(lean.overhangIn) || 0;
  // A lean's OWN framed overhang was never read here: only gable-extensions
  // used leanFrameIn, so a shed or gable lean silently inherited the main
@@ -1199,30 +1706,37 @@ export function computeLeanToMaterials(b, lean, dims) {
  : mainFrameIn >= 6
  ? mainFrameIn / 12
  : 0;
- const leanPitchRatio = (Number(lean.pitch) || 3) / 12;
- const halfSpan = isGable
- ? (isGableExt ? length / 2 : depth / 2) + metalOhOrderFt + frameOhOrderFt
- : depth + metalOhOrderFt + frameOhOrderFt;
- // Gable-extension: rise on full half-span incl. OH (Jim → 20'5"). Plain gable
- // lean keeps rise on building half-depth only (Mark/Prater locks).
- // Rise on the building depth alone is the ordering convention the shed-lean
- // benchmarks were built on (Mark/Prater/Pulver), so an INHERITED main overhang
- // keeps it. A lean's own framed overhang continues down the same roof plane —
- // run and rise grow together — so that case uses the full span.
- const riseRun = isGable
- ? (isGableExt ? halfSpan : depth / 2) * leanPitchRatio
- : (leanOwnFrameOh ? halfSpan : depth) * leanPitchRatio;
- const leanOrderSlope = Math.hypot(halfSpan, riseRun);
- // Same order-add policy as main roof (wood OH → 3″ drip; else short/mid).
- const leanAddIn = roofPanelOrderAddInches(leanOrderSlope, {
- overhangIn: mainFrameIn >= 6 ? mainFrameIn : 0,
- metalOverhangIn:
- Number.isFinite(metalInRaw) && metalInRaw > 0 ? metalInRaw : 3,
+ // Measured by the tape (measure.js), same three rules as the main roof: the
+ // plane runs from the high point to the OUTSIDE OF THE FRAMING, the metal
+ // drip is added along that plane instead of being folded into the horizontal
+ // run, and the cut rounds up to the next inch. The banded order-add that used
+ // to sit on top of this is gone.
+ const structRunFt = isGable
+ ? (isGableExt ? length / 2 : depth / 2) + frameOhOrderFt
+ : depth + frameOhOrderFt;
+ // Which run the RISE is taken over, when it differs from the run the sheet
+ // covers. A gable-extension rises over its own full half-span. A plain gable
+ // lean rises over the building half-depth. A shed lean rises over its depth
+ // unless its own framed overhang continues the plane, in which case run and
+ // rise grow together.
+ const riseRunFt = isGable
+ ? (isGableExt ? structRunFt : depth / 2)
+ : leanOwnFrameOh
+ ? structRunFt
+ : depth;
+ const leanPlane = measureRoofPlane(null, {
+ pitch: Number(lean.pitch) || 3,
+ runFt: structRunFt,
+ framedOhFt: 0,
+ metalOhFt: metalOhOrderFt,
+ riseRunFt,
  });
- const roofPanelLen = Math.round((leanOrderSlope + leanAddIn / 12) * 12) / 12;
+ const leanOrderSlope = leanPlane.structuralSlopeFt;
+ const roofPanelLen = leanPlane.panelCutFt;
 
  // --- Wall metal (closed faces) ---
  // Open carport leans: outer open, but END walls still get metal (sales photos).
+ // Cantilever: all faces open via leanOpenFaceList — no wall metal.
  // Upper panels stop at wainscot top when wainscot is on (band counted separately)
  let wallPanelLf = 0; // linear feet of wall coverage (divide by 3 for qty)
  let wallPanelLen = outerH + 1; // stock panel length (upper wall)
@@ -1298,6 +1812,22 @@ export function computeLeanToMaterials(b, lean, dims) {
  outerBearerLf,
  outerBearerSize,
  subFasciaLf,
+ cantileverRafterQty,
+ cantileverRafterLenFt,
+ cantileverRafterSize,
+ cantileverRafterSpacingFt,
+ joistHangerAutoQty: hangersOn && isShed ? cantileverRafterQty : 0,
+ joistHangerBillQty: (() => {
+  if (!(hangersOn && isShed)) return 0;
+  const override = Number(lean.joistHangerQty);
+  if (Number.isFinite(override) && override > 0) return Math.round(override);
+  return cantileverRafterQty;
+ })(),
+ joistHangers: hangersOn && isShed && (
+  (Number.isFinite(Number(lean.joistHangerQty)) && Number(lean.joistHangerQty) > 0) ||
+  cantileverRafterQty > 0
+ ),
+ joistHangerSize: hangersOn ? hangerSize : '2x8',
  girtRows,
  girtLf,
  skirtLf,
@@ -1313,7 +1843,10 @@ export function computeLeanToMaterials(b, lean, dims) {
  cornerCount,
  baseLf,
  ceilingLiner,
+ ceilingLinerColor: lean.ceilingLinerColor || 'AR',
  linerAreaSqFt,
+ wallLiner,
+ wallLinerColor: lean.wallLinerColor || 'AR',
  };
 }
 
@@ -1358,7 +1891,7 @@ export function girtLevelsForHeight(wallHeightFt, spacingFt, wainH = 0, opts = {
 
 /**
  * True when both eave walls (left+right) have full-length enclosed shed leans.
- * In that dual-wing layout benchmark treats shared main eaves as interior (no main
+ * In that dual-wing layout PBP matrix treats shared main eaves as interior (no main
  * eave girts/skirt); lean outers carry the skin. Single-lean jobs (Levi) still
  * count the host main wall.
  */
@@ -1385,7 +1918,11 @@ export function generateGirts(b) {
  const spacingFt = (b.girtSpacingIn || 24) / 12;
  const eave = Number(b.eaveHeight) || 12;
  const production = useFullGirtPackage(b);
- const levelOpts = { includeEave: girtIncludeEaveNailer(b) };
+ // Never a girt at the eave line on an eave wall — the 2-ply truss bearer is
+ // the top girt there. Gable ends get one only when the truss's bottom chord
+ // is not at sidewall height to take the fasteners (scissor / parallel chord).
+ const levelOpts = { includeEave: false };
+ const gableEaveRow = gableEaveGirtRow(b);
 
  const wainOn =
  b.wainscotColor &&
@@ -1415,14 +1952,16 @@ export function generateGirts(b) {
   if (dualEaveLeans && (wall === 'left' || wall === 'right')) continue;
   let len = wallLength(b, wall);
   // Partial enclosed shed lean: KEEP host-wall girts through the lean span.
-  // SmartBuild still orders main-wall #3YP field girts on that stretch (Doug
+  // Job Review still orders main-wall #3YP field girts on that stretch (Doug
   // 30×60 + 20′ lean → ~124 total); lean outer/ends are additive. Omitting
   // the host span under-counted ~1 board/row × levels (~8–10 pcs).
   // Full-length leans (Levi) and dual eave wings unchanged (dual skips eaves).
   // Ell wings still bury the host run — a wing is its own building billing girts.
   len = Math.max(0, len - Math.min(ellBuriedRunOnWall(b, wall), len));
   if (len > 0.1) {
-  runs.push({ wall, lengthFt: len, rows: levels.length, host: 'main' });
+  const isGableEnd = wall === 'front' || wall === 'back';
+  const rows = levels.length + (isGableEnd && gableEaveRow ? 1 : 0);
+  runs.push({ wall, lengthFt: len, rows, host: 'main' });
   }
  }
 
@@ -1460,7 +1999,7 @@ export function generateGirts(b) {
  });
  }
  // Dual enclosed eave wings: lean end walls sit in the extended gable
- // plane and are packed with main gable girts in benchmark (Mark → ~56 not 85+).
+ // plane and are packed with main gable girts in PBP matrix (Mark → ~56 not 85+).
  if (depth > 0.1 && !dualEaveLeans) {
  const endH = Math.max(outerH, attachH);
  const lv = girtLevelsForHeight(endH, spacingFt, wainH, levelOpts).filter(
@@ -1515,7 +2054,10 @@ export function generateGirts(b) {
  */
 export function generatePurlins(b) {
  const metalOh = panelMetalOverhangIn(b) / 12;
- const frameOh = (Number(b.overhangIn) || 0) / 12;
+ const frameOh =
+  (b.overhangEaveIn != null && Number.isFinite(Number(b.overhangEaveIn))
+    ? Number(b.overhangEaveIn)
+    : Number(b.overhangIn) || 0) / 12;
  const rafter = rafterLength(b);
  const halfRun = (Number(b.width) || 0) / 2 + metalOh + frameOh;
  const stationPad = purlinStationPad(b);
@@ -1578,7 +2120,7 @@ export function generateSkirt(b) {
  linearFt += length;
  runs.push({ lengthFt: length, rows: 1 });
  }
- // Dual eave wings: lean-end skirt is in the extended gable line (Mark benchmark 8).
+ // Dual eave wings: lean-end skirt is in the extended gable line (Mark PBP matrix 8).
  if (!dualEaveLeans) {
  if (!isLeanFaceOpen(lean, 'leftEnd')) {
  linearFt += depth;
@@ -1621,22 +2163,63 @@ export function generateTrussCarriers(b) {
 }
 
 /**
- * Opening lumber — production order package (calibrated to Benchmark order lists).
+ * Opening lumber — production order package (calibrated to PBP shop order lists).
  *
  * Names: Header / Trimmer / Sill / Backing (no KingStud on order list).
  * Stock: prefer 12' boards when RO + bearing fits.
  *
  * Window: 2-ply 2x6 header @12, 1 sill @12, 4 backing @12 (no jacks/kings on order).
  * Walk:   2-ply 2x6 header @12, 2 trimmers @12, 6x6 jamb posts.
- * OH/slider: 1× 2x12 @12 + 2× 2x6 @12 (benchmark order package), 6x6 jamb posts.
+ * OH/slider: 1× 2x12 @12 + 2× 2x6 @12 (PBP shop order package), 6x6 jamb posts.
  *
  * Full package (eave≥14′ / lean) emits Header+Trimmer+Sill+Backing (Levi).
- * Small-shop takeoff omits Trimmer/Sill/Backing — headers + JambPost only (60×60×10 benchmark).
+ * Small-shop takeoff omits Trimmer/Sill/Backing — headers + JambPost only (60×60×10 PBP matrix).
  *
  * Typical full OH + walk + 1 window → Header 1@2x12 + 4@2x6, Trimmer 2, Sill 1, Backing 4.
  */
-export function openingFraming(openings, b = {}) {
- /** Order stock: prefer 12' for opening lumber when piece fits. */
+export function openingFraming(openings, b = {}, mainPosts = []) {
+ /**
+  * Next stock length STRICTLY past the cut: 8,10,12,14,16,18,20,24.
+  *
+  * Levi: a header runs past the opening on both sides so there is something to
+  * fasten to, so it always steps up — a 10' garage door takes a 12' header, not
+  * a 10' one. A cut landing exactly on a stock length steps up too, because a
+  * board the exact length of its cut has no slack left to attach with.
+  */
+ const stockFor = (ft) => {
+ const x = Math.max(0.5, Number(ft) || 0);
+ for (const L of [8, 10, 12, 14, 16, 18, 20, 24]) if (x < L - 0.01) return L;
+ return Math.ceil(x);
+ };
+
+ /**
+  * Distance between the posts actually carrying this opening (ft), or null
+  * when they cannot be identified.
+  *
+  * Normally those are the jambs, at the door's own edges, so this equals the
+  * door width. It is read from the posts rather than assumed because a header
+  * that stops short of the post it bears on is the same defect as a post that
+  * does not reach its truss, and the layout — not the door width — is what
+  * decides where the bearing actually is.
+  */
+ const supportSpanFt = (o) => {
+ const wall = o?.wall || 'front';
+ const u0 = Number(o?.offset);
+ const w0 = Number(o?.width);
+ if (!Number.isFinite(u0) || !Number.isFinite(w0)) return null;
+ const eps = 0.1;
+ let left = null;
+ let right = null;
+ for (const p of mainPosts || []) {
+ if ((p?.primaryWall || null) !== wall) continue;
+ const u = Number(p?.alongFt);
+ if (!Number.isFinite(u)) continue;
+ if (u <= u0 + eps && (left == null || u > left)) left = u;
+ if (u >= u0 + w0 - eps && (right == null || u < right)) right = u;
+ }
+ if (left == null || right == null || right <= left) return null;
+ return right - left;
+ };
  const stock12 = (ft) => {
  const x = Math.max(0.5, Number(ft) || 0);
  if (x <= 12.01) return 12;
@@ -1649,21 +2232,26 @@ export function openingFraming(openings, b = {}) {
  const w = Number(o.width) || 0;
  const h = Number(o.height) || 0;
  const type = o.type || 'walk';
- // Bearing past RO — order still packs to 12' stock for common openings
- const headerSpan = w + 0.5;
+ // What the header actually has to cover: the wider of the door plus its
+ // bearing, and the gap between the posts carrying it (a snapped jamb can put
+ // a post up to 17" outboard of the RO).
+ const span = supportSpanFt(o);
+ const headerSpan = Math.max(w + 0.5, (span != null ? span : 0) + 0.5);
 
  if (type === 'window') {
- // Order list: Header + Sill + Backing only (no KingStud / window Trimmer lines)
+ // One 20' 2x6 frames a window — head, sill and both jambs cut from the one
+ // board. The order carries the board, not the four pieces it becomes.
+ // Replaces a 2-ply header + sill + 4 backing package (seven 12' boards) that
+ // came off a PBP shop order list rather than from how one gets built.
  return {
  openingId: o.id,
  type,
  role: 'window',
  kingStuds: null,
  jackStuds: null,
- header: { size: '2x6', plies: 2, lengthFt: stock12(headerSpan), cutFt: headerSpan },
- sill: { size: '2x6', qty: 1, lengthFt: stock12(Math.max(w + 0.25, 1)), cutFt: w + 0.25 },
- // Window nailer package — 4× 2x6x12 per window (production "Backing")
- backing: { size: '2x6', qty: 4, lengthFt: 12 },
+ header: null,
+ sill: null,
+ backing: { size: '2x6', qty: 1, lengthFt: 20 },
  needsJambPosts: false,
  headerWidth: w,
  };
@@ -1685,29 +2273,22 @@ export function openingFraming(openings, b = {}) {
  };
  }
 
- // Overhead / slider — 2x12 main; small-shop also 2× 2x6 package boards per door
- // (benchmark 35×55: 3 OH → 3@2x12 + 6@2x6). Full package (Levi) lists 2x12 only.
- const smallShop = !useFullGirtPackage(b);
+ // Overhead / slider: one 2x10 and two 2x6, each at least 6" longer than the
+ // door so they bear past the RO on both sides. Stock is the next size up that
+ // fits the cut.
+ //
+ // Was a 2x12 with the two 2x6 given only to "small shop" jobs — a package
+ // that came off PBP shop order lists and changed with eave height, which is
+ // not something a door header cares about.
+ const cut = headerSpan;
  return {
  openingId: o.id,
  type,
  role: type,
  kingStuds: null,
  jackStuds: null,
- header: {
- size: '2x12',
- plies: 1,
- lengthFt: stock12(Math.max(headerSpan, 10)),
- cutFt: headerSpan,
- },
- headerSecondary: smallShop
- ? {
- size: '2x6',
- plies: 2,
- lengthFt: stock12(Math.max(headerSpan, 10)),
- cutFt: headerSpan,
- }
- : null,
+ header: { size: '2x10', plies: 1, lengthFt: stockFor(cut), cutFt: cut },
+ headerSecondary: { size: '2x6', plies: 2, lengthFt: stockFor(cut), cutFt: cut },
  sill: null,
  backing: null,
  needsJambPosts: true,
@@ -1800,7 +2381,7 @@ export function generateStudWalls(b) {
 export function generateFraming(b) {
  // Normalize stale lean outer eaves (old default pitch 3 → 12' on 14'/8' lean)
  // so posts, metal, and girts share production geometry.
- // Keep explicit broken-pitch leans (lean.pitch ≠ main.pitch) — benchmark orders
+ // Keep explicit broken-pitch leans (lean.pitch ≠ main.pitch) — PBP shop orders
  // separate roof planes; do not force lean pitch up to main.
  for (const lt of b.leanTos || []) {
  if (!lt || (lt.roofStyle || 'shed') === 'gable') continue;
@@ -1903,7 +2484,7 @@ export function generateFraming(b) {
  }
  const studWalls = studFrame ? generateStudWalls(b) : null;
  const trussCarriers = generateTrussCarriers(b);
- const openings = openingFraming(b.openings || [], b);
+ const openings = openingFraming(b.openings || [], b, mainPosts);
 
  // Aggregate lean-to lumber from per-package material models
  // Note: lean girts/skirt are already in girts.runs / skirt.runs.
@@ -1934,13 +2515,17 @@ export function generateFraming(b) {
  // Legacy alias — lean sub-fascia removed (outer is rafter bearer now)
  const leanSubFasciaLf = 0;
 
- // Perma-column + gable-extension (Jim): remap CCA sleeve lengths toward benchmark
+ // Perma-column + gable-extension (Jim): remap CCA sleeve lengths toward PBP matrix
  // 16@14 / 14@18 / 15@20 / 2@22 / 2@24 without changing station count.
+ // Triggers when main OR a gable-extension lean has permaColumns on.
  const allPostsCombined = [...mainPosts, ...leanPosts];
- if (
-  b.permaColumns &&
-  (b.leanTos || []).some((lt) => lt && (lt.kind || 'leanto') === 'gable-extension')
- ) {
+ const gableExtLeans = (b.leanTos || []).filter(
+  (lt) => lt && (lt.kind || 'leanto') === 'gable-extension',
+ );
+ const wantPermaRemap =
+  gableExtLeans.length > 0 &&
+  (!!b.permaColumns || gableExtLeans.some((lt) => lt.permaColumns));
+ if (wantPermaRemap) {
   const stockOf = (p) => Number(p.stockFt ?? p.totalLengthFt) || 0;
   const setStock = (p, L) => {
    p.stockFt = L;
@@ -1970,7 +2555,7 @@ export function generateFraming(b) {
    setStock(p, 18);
    by[18].push(p);
   }
-  // Excess 22′ → 18′ until 2@22 (benchmark)
+  // Excess 22′ → 18′ until 2@22 (PBP matrix)
   while (by[22].length > 2 && by[18].length < 14) {
    const p = by[22].pop();
    setStock(p, 18);
@@ -2052,27 +2637,27 @@ export function optimizeBoards(linearFt, stockLengths = [20, 16, 14, 12, 10, 8])
 }
 
 /**
- * Post stock lengths: 2' increments from 8' through 26' (nail-lam / tall-eave benchmark).
+ * Post stock lengths: 2' increments from 8' through 26' (nail-lam / tall-eave PBP matrix).
  * Taller stations order 26' + field spliced note when past max.
  */
 export const POST_STOCK_LENGTHS = [8, 10, 12, 14, 16, 18, 20, 22, 24, 26];
 
 /**
  * Max rise / full-roof-rise for collapsing a 2nd stock step (e.g. 18′→14′).
- * Sized so 60×10 low-gable jambs package as eave (benchmark 4@14′) while Levi front
+ * Sized so 60×10 low-gable jambs package as eave (PBP matrix 4@14′) while Levi front
  * OH jambs (riseFrac ≈ 0.44 on 55×14) keep full 22′ stock.
  */
 export const JAMB_SECOND_STEP_MAX_RISE_FRAC = 0.42;
 
 /**
- * Door jamb ORDER height (benchmark framing lists).
+ * Door jamb ORDER height (PBP framing lists).
  *
  * Structural height still follows the rake for 3D/plans. For stock only:
  *  1) full stock ≤ eave stock + 2′  → package as eave (16′→14′ always)
  *  2) full stock ≤ eave stock + 4′ AND rise/fullRise ≤ 0.42 → eave
  *     (low 18′ gable jambs → 14′; mid/peak and Levi 22′ stay full height)
  *
- * Returns { heightFt, eaveClamped } so stock pick can apply benchmark eave-jamb step-down.
+ * Returns { heightFt, eaveClamped } so stock pick can apply PBP matrix eave-jamb step-down.
  */
 export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDepthFt) {
  if (!isOpeningJamb) {
@@ -2085,7 +2670,7 @@ export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDept
  const fullStock = pickPostStockLengthCore(h, embed).stockFt;
  const riseAboveEave = h - eave;
  // Already on eave wall (no rise): normal eave post stock — do NOT step down.
- // (35×55×12 benchmark: all 6 jambs @16′ same as wall posts.)
+ // (35×55×12 PBP matrix: all 6 jambs @16′ same as wall posts.)
  if (riseAboveEave <= 0.05) {
  return { heightFt: eave, eaveClamped: false };
  }
@@ -2105,7 +2690,7 @@ export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDept
 
 /**
  * Low-gable jambs collapsed to eave use the same stock as eave wall posts.
- * (Earlier −2′ step matched one 60×12 dump but broke 35×55 benchmark 6@16′ jambs.)
+ * (Earlier −2′ step matched one 60×12 dump but broke 35×55 PBP matrix 6@16′ jambs.)
  */
 export function eaveClampedJambStockFt(eaveHeightFt, postDepthFt) {
  const eave = Number(eaveHeightFt) || 0;
@@ -2142,7 +2727,7 @@ function pickPostStockLengthCore(
  let stockFt = sorted.find((L) => L + eps >= requiredFt);
  if (stockFt == null) {
  const maxL = sorted[sorted.length - 1] || 24;
- // Order max stock; field-cut callout = required to nearest inch (benchmark uses plan length)
+ // Order max stock; field-cut callout = required to nearest inch (PBP matrix uses plan length)
  const fieldCutFt = Math.round(requiredFt * 12) / 12;
  return {
  requiredFt,
@@ -2153,24 +2738,22 @@ function pickPostStockLengthCore(
  };
  }
 
- // benchmark mid-gable: req ~18.1–18.5′ may order 18′ not 20′ when policy enables demotion
- // (auto: mid-width / plain-narrow small-shop). Wide / full-package / keep20 keep 20′.
- // Frank 35×50 uses midGablePostPolicy:'keep20' (same req band as 30×40 goldens).
- // Do NOT general shortfall — that wrongly demotes 60×10 16.33′→16′ instead of 18′.
- if (
- !coreOpts.disableMidGable18 &&
- stockFt === 20 &&
- requiredFt > 18 + eps &&
- requiredFt <= 18.5 + eps
- ) {
- stockFt = 18;
- }
+ // A post is never ordered shorter than it has to be. What stood here demoted
+ // a 20′ pick back to 18′ whenever the requirement landed between 18′ and
+ // 18′6″ — fitted to one PBP matrix order list — which shipped a 4″ shortfall
+ // on the commonest sizes there are: a 30×40 or 40×40 gable post needs 18′4″
+ // and got an 18′ stick. Gable posts attach to the TOP CHORD of the end truss,
+ // so a short one does not reach the member it fastens to.
+ //
+ // Genuinely over-length posts are still handled, and honestly: they take the
+ // longest stock with a FIELD SPLICED callout on the order line (see overMax
+ // above). That is the only way a post may come up under its requirement.
 
  let gradeBufferApplied = false;
  const slack = stockFt - requiredFt;
  // Exact hit OR slack under min → next 2' (only when stock covers required)
  if (slack >= -eps && slack < MIN_GRADE_SLACK_FT - eps) {
- // Raised-heel nail-lam: exact 24′ required stays on 24′ (Doug benchmark @24 band);
+ // Raised-heel nail-lam: exact 24′ required stays on 24′ (Doug PBP matrix @24 band);
  // only bump into 26′ when required is past 24′.
  const keepExact24 = heel > 0 && stockFt === 24 && requiredFt <= 24 + eps;
  if (!keepExact24) {
@@ -2182,7 +2765,7 @@ function pickPostStockLengthCore(
  }
  }
  // Tall-eave band: req just under/at 20′ (16′ eave + 3′ embed = 19′) orders 22′
- // stock on benchmark nail-lam / production CCA ladders — not a tight 20′.
+ // stock on PBP matrix nail-lam / production CCA ladders — not a tight 20′.
  // Mid-gable 18′ demotion already ran; req≤18.5′ stays on 18′/20′ as before.
  if (
   !coreOpts.disableTallEave22 &&
@@ -2216,16 +2799,16 @@ function pickPostStockLengthCore(
  * required = height above grade (eave OR gable-end height at that station) + post depth
  * Then round UP to next even stock length (8'–24' max).
  *
- * Grade buffer (benchmark / production) for regular posts:
+ * Grade buffer (PBP matrix / production) for regular posts:
  *   1) Exact hit on a stock length → bump +2' (e.g. 18' exact → 20').
  *   2) If slack (stock − required) is under MIN_GRADE_SLACK (6"), bump +2'
- *      so peaks with 21.67' required don't order a tight 22' — benchmark uses 24'
+ *      so peaks with 21.67' required don't order a tight 22' — PBP matrix uses 24'
  *      on 40×40 4/12 @ 3' embed (21.67' → 24').
  *
  * Door jambs (opts.isOpeningJamb):
  *   - near-eave stocks collapse to eave package (jambOrderHeightFt)
- *   - soft grade buffer (exact-hit only) so 17.7′ stays 18′ not 20′ (benchmark mid-jambs)
- *   - near-peak: if first pick is 22′ and required > 21′, bump to 24′ (benchmark peak jambs)
+ *   - soft grade buffer (exact-hit only) so 17.7′ stays 18′ not 20′ (PBP matrix mid-jambs)
+ *   - near-peak: if first pick is 22′ and required > 21′, bump to 24′ (PBP matrix peak jambs)
  *
  * @param {number} heightAboveGradeFt - eave height, or taller gable-end height toward peak
  * @param {number} postDepthFt
@@ -2252,7 +2835,6 @@ export function pickPostStockLength(heightAboveGradeFt, postDepthFt, stock = POS
  // lifts Doug eave jambs 19→21.5→22′; Jim perma stays on prior ladder.
  const stockClamp = (stock || POST_STOCK_LENGTHS).filter((L) => L <= (heel > 0 ? 26 : 24));
  const wallPick = pickPostStockLengthCore(eaveH, embed, stockClamp, {
- disableMidGable18: true,
  heelHeightFt: heel,
  });
  return {
@@ -2262,9 +2844,7 @@ export function pickPostStockLength(heightAboveGradeFt, postDepthFt, stock = POS
  fieldCutFt: null,
  };
  }
- // Jambs: exact-hit buffer only. Regular posts: 6" grade buffer + mid-gable 18′ rule.
- // Policy: useMidGable18Demotion (auto width/lean + package, or explicit keep20/demote18).
- const applyMidGable18 = useMidGable18Demotion(opts.building);
+ // Jambs: exact-hit buffer only. Regular posts: 6" grade buffer.
  // Perma-column / pad footing (embed ≈ 0): order exact above-grade stock
  // (Jim wing 14′ eave → 14′, not grade-bumped 16′). Buried posts keep 6″ slack.
  const embedFt = Number(postDepthFt) || 0;
@@ -2277,34 +2857,22 @@ export function pickPostStockLength(heightAboveGradeFt, postDepthFt, stock = POS
   : (stock || POST_STOCK_LENGTHS).filter((L) => L <= 24);
  // Tall-eave 20→22: raised heel or partial enclosed shed lean (Doug nail-lam).
  // Compact tall plain (Landon/Pulver 30×40×16, no heel) keeps covering 20′ —
- // SmartBuild lists ~10@20′ eave stock, not grade-bumped 22′.
+ // Job Review lists ~10@20′ eave stock, not grade-bumped 22′.
  // Gable-extension wings (Jim) also keep prior ladder.
  const tallEave22 =
   eaveH >= 16 &&
   (heelOpt > 0 || hasPartialEnclosedShedLean(opts.building));
  const pick = pickPostStockLengthCore(orderH, postDepthFt, stockUse, {
  minGradeSlackFt: isJamb ? 0.05 : embedFt < 0.1 ? 0 : 0.5,
- disableMidGable18: isJamb || !applyMidGable18,
  disableTallEave22: !tallEave22,
  eaveHeightFt: eaveH,
  heelHeightFt: heelOpt,
  });
- // Explicit keep20: lift mid-gable 18′ (req ~16.1–18.5′) → 20′ so odd-width
- // (35′) stations that never hit the 20→18 demotion band still match benchmark 4@20′.
- if (
-  !isJamb &&
-  isExplicitMidGableKeep20(opts.building) &&
-  pick.stockFt === 18 &&
-  !pick.overMax
- ) {
-  const req18 = Number(pick.requiredFt) || 0;
-  if (req18 > 16.001 && req18 <= 18.5 + 0.001) {
-   return { ...pick, stockFt: 20, gradeBufferApplied: true };
-  }
- }
- // Near-peak grade (benchmark / Kane): bump tight 22′ stock to 24′ when required is
+ // The keep20 counterpart to that demotion is gone with it: a requirement in
+ // the 18′–18′6″ band now picks 20′ on its own, so there is nothing to lift.
+ // Near-peak grade (PBP shop): bump tight 22′ stock to 24′ when required is
  // past the 21′ band (e.g. 32′×12′ 4/12 peak req 21.33′ → 24′, not 22′).
- // Exact req=21′ (h=18′ @ 3′ embed) stays 22′ (golden benchmark 1@22 + 1@24).
+ // Exact req=21′ (h=18′ @ 3′ embed) stays 22′ (golden PBP matrix 1@22 + 1@24).
  // Applies to peak posts and near-peak jambs.
  const structH = Number(heightAboveGradeFt) || 0;
  const req = Number(pick.requiredFt) || 0;

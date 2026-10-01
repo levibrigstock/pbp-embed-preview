@@ -1,0 +1,75 @@
+# Check the package is intact. Nothing here publishes.
+#
+# This repo is PUBLISHED BY GITHUB PAGES, from main at the repo root. There is
+# no deploy step to run: pushing to main is the deploy.
+#
+# It used to carry a Netlify deploy workflow as well. That workflow was never
+# armed — no NETLIFY_AUTH_TOKEN was ever set on this repo — so every run ended
+# at "Not armed — skipping deploy" while Pages quietly did the publishing. A
+# green run that publishes nothing, sitting next to a publish that never
+# appears in its logs, is worse than no workflow at all: it was read as proof
+# the site had updated when it had not. The deploy half is gone; these checks
+# are the half that was doing real work, and they stay.
+#
+# They matter more now, not less: polebarn-pro's deploy workflow pushes new
+# packs into this repo automatically, so this is what stands between a bad pack
+# and a customer's iframe.
+
+name: Check the package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check the package is intact
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # There is no build and no test suite here, so these stand in for one.
+      # They are not ceremony: every one of them is a way this package has
+      # actually been broken or could silently ship broken.
+      - name: Check the package is intact
+        run: |
+          set -uo pipefail
+          fail=0
+          note() { echo "::error::$1"; fail=1; }
+
+          # The entry point customers load.
+          [ -s public/embed.html ] || note "public/embed.html is missing or empty"
+
+          # pack-embed.sh wipes this directory with find -delete and the real
+          # lead config has to be restored afterwards. Losing it does not break
+          # the page, it breaks lead capture silently — no error, just quotes
+          # that never arrive. Worth failing over.
+          if [ ! -s public/lead-config.json ]; then
+            note "public/lead-config.json is missing — leads would be dropped silently"
+          else
+            python3 -c "import json,sys; json.load(open('public/lead-config.json'))" \
+              || note "public/lead-config.json is not valid JSON"
+          fi
+
+          # Three.js is vendored, not fetched. A missing vendor file renders a
+          # blank iframe on a customer's site.
+          for f in vendor/three-embed.module.js vendor/OrbitControls-embed.js; do
+            [ -s "$f" ] || note "$f is missing — the viewer would not load"
+          done
+
+          # Every module reachable from the entry point must actually be here.
+          # This is the failure pack-embed.sh has hit twice: a new js/domain
+          # module gets imported but not copied, so the embed 404s on load
+          # while the source repo looks perfectly fine. Resolved properly by
+          # walking the graph — counting import lines would prove nothing.
+          python3 scripts/check-import-graph.py || fail=1
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "package OK"

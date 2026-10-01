@@ -42,6 +42,10 @@ export const COLOR_CODES = {
   SL: 'Charcoal / Slate',
   LB: 'Light Blue',
   CG: 'Clay / Claystone',
+  TP: 'Taupe',
+  CN: 'Colony Green',
+  LS: 'Lt Stone',
+  BS: 'Burnished Slate',
 };
 
 /** A human label for a colour code, falling back to the code itself. */

@@ -242,3 +242,52 @@ export function crossGableGeometry(host, cg = {}) {
     coveredRoofSqFt,
   };
 }
+
+/**
+ * Entry / cross gable roof framing plan in the gable's own (t, d, y) frame:
+ * t along the host wall, d INWARD from the wall line (negative = oversail),
+ * y height. What the Frame view draws (scene.js _addCrossGableFraming):
+ *
+ *  - ridge board: outer face → where the ridge dies into the main roof;
+ *  - gable-end rafter pair on the outer face (eave → ridge, each side);
+ *  - header over the two standing posts, only when it projects (> 0.25');
+ *  - purlins on each slope parallel to the ridge, outer face → valley,
+ *    rows = max(2, ceil(half width / purlin spacing)) per slope.
+ *
+ * NOTE: the takeoff bills the cross gable's metal, trim, valley and posts but
+ * no framing lumber; this plan is the 3D model only.
+ */
+export function crossGableFramingPlan(g, opts = {}) {
+  const out = { ridge: null, rafters: [], header: null, purlins: [], counts: { ridge: 0, rafters: 0, header: 0, purlins: 0 } };
+  if (!g || !g.supported) return out;
+  const half = g.widthFt / 2;
+  const c = g.alongCentre;
+  const k = g.kGable;
+  const proj = Math.max(0, Number(g.projectionFt) || 0);
+  const yAt = (t) => g.ridgeY - k * Math.abs(t - c);
+  const dAt = (t) => (yAt(t) - g.hostEaveY) / Math.max(g.hostSlope, 0.001);
+  const d0 = -proj;
+  out.ridge = { a: { t: c, d: d0, y: g.ridgeY }, b: { t: c, d: Math.max(d0 + 0.1, Number(g.ridgeIntoRoofFt) || 0), y: g.ridgeY } };
+  out.counts.ridge = 1;
+  for (const side of [-1, 1]) {
+    out.rafters.push({ a: { t: c + side * half, d: d0, y: g.eaveY }, b: { t: c, d: d0, y: g.ridgeY } });
+  }
+  out.counts.rafters = out.rafters.length;
+  if (proj > 0.25) {
+    out.header = { a: { t: c - half, d: d0, y: g.eaveY }, b: { t: c + half, d: d0, y: g.eaveY } };
+    out.counts.header = 1;
+  }
+  const sp = Math.max(0.5, Number(opts.purlinSpacingFt) || 2);
+  const rows = Math.max(2, Math.ceil(half / sp - 1e-9));
+  for (const side of [-1, 1]) {
+    for (let r = 0; r < rows; r += 1) {
+      const t = c + side * half * ((r + 0.5) / rows);
+      const y = yAt(t);
+      const dEnd = dAt(t);
+      if (!(dEnd > d0 + 0.1)) continue;
+      out.purlins.push({ a: { t, d: d0, y }, b: { t, d: dEnd, y } });
+    }
+  }
+  out.counts.purlins = out.purlins.length;
+  return out;
+}

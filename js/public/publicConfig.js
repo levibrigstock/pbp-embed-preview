@@ -63,6 +63,10 @@ export const PUBLIC_COLORS = {
   SL: { label: 'Charcoal / Slate', hex: '#2a2e34', item13: 'CHARCOAL' },
   LB: { label: 'Light Blue', hex: '#2e6fa8', item13: 'OCEANBLUE' },
   CG: { label: 'Clay / Claystone', hex: '#d2b48c', item13: 'LIGHTSTONE' },
+  TP: { label: 'Taupe', hex: '#a39382', item13: 'TAUPE' },
+  CN: { label: 'Colony Green', hex: '#a5b593', item13: 'COLONYGREEN' },
+  LS: { label: 'Lt Stone', hex: '#cfc5b0', item13: 'LIGHTSTONE' },
+  BS: { label: 'Burnished Slate', hex: '#5a534d', item13: 'BURNISHEDSLATE' },
 };
 
 export const PUBLIC_COLOR_CODES = Object.keys(PUBLIC_COLORS);

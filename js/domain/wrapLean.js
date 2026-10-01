@@ -450,3 +450,120 @@ export function wrapRoofSlopeRibStations(fp, leg = 'A', spacing = 0.75) {
   }
   return stations;
 }
+
+/**
+ * Wrap lean outer eave height limits (ft).
+ *
+ * Both legs share ONE outer eave (`lean.eaveHeight`) — the continuous hip
+ * needs matching eaves on each leg. The high side (outer eave + depth × pitch)
+ * must stay at or below the main eave so the shed pitch reads; `max` is that
+ * limit floored to the inch. `min` matches the single-lean field (6').
+ *
+ * `defaultFt` mirrors createLeanTo's derived default (main eave − rise, min 8')
+ * clamped into range — what a job without a stored height gets.
+ */
+export const WRAP_EAVE_MIN_FT = 6;
+
+export function wrapLeanEaveLimits(b, lean) {
+  const mainEaveFt = Number(b?.eaveHeight) || 12;
+  const depth = Math.max(2, Number(lean?.depth) || 12);
+  const pitch = Number(lean?.pitch) || Number(b?.pitch) || 4;
+  const riseFt = depth * (pitch / 12);
+  const maxRaw = Math.floor((mainEaveFt - riseFt) * 12 + 1e-6) / 12;
+  const min = WRAP_EAVE_MIN_FT;
+  const max = Math.max(min, maxRaw);
+  const derived = Math.max(8, Math.round((mainEaveFt - riseFt) * 12) / 12);
+  const defaultFt = Math.min(max, Math.max(min, derived));
+  return {
+    min,
+    max,
+    mainEaveFt,
+    riseFt,
+    defaultFt,
+    /** false when even a 6' eave cannot fit this depth × pitch under the main eave */
+    pitchValid: maxRaw >= min,
+  };
+}
+
+/**
+ * Clamp a requested wrap outer eave (ft) into range, rounded to the inch.
+ * Blank / invalid → the derived default.
+ */
+export function clampWrapLeanEave(b, lean, ft) {
+  const lim = wrapLeanEaveLimits(b, lean);
+  const n = Number(ft);
+  if (!Number.isFinite(n) || n <= 0) return lim.defaultFt;
+  const c = Math.min(lim.max, Math.max(lim.min, n));
+  // max is inch-floored, so rounding to the inch cannot exceed it
+  return Math.min(lim.max, Math.round(c * 12) / 12);
+}
+
+/**
+ * Wrap lean roof framing plan (plan coordinates + outward distance `u`).
+ *
+ * Each leg is a shed plane sloping out from its host wall. Leg A owns the
+ * strip along wall A plus its half of the D×D corner square (u ≥ −v, where v
+ * runs along wall A from the building corner and u out from it); the hip is
+ * u = −v, building corner → outer corner.
+ *
+ *  - common rafters: ledger (u=0) → outer bearer (u=depth) at `stationsA/B`
+ *    (along each wall from the building corner, ends inclusive — the same
+ *    stations the takeoff counts);
+ *  - jack rafters: in the corner square at v = −k·spacing, hip → outer bearer;
+ *  - hip rafter: building corner → outer corner;
+ *  - purlins: `purlinRowsPerLeg` rows per leg across the depth, each running
+ *    from the hip to the leg's free end, so the two legs meet (mitre) on the hip.
+ *
+ * Heights are left to the caller: y(u) = attach − (attach − outer) · u/depth.
+ */
+export function wrapRoofFramingPlan(fp, opts = {}) {
+  const depth = Number(fp?.depth) || 0;
+  const out = { rafters: [], purlins: [], hip: null, counts: { common: 0, jack: 0, rafters: 0, purlins: 0 } };
+  if (!(depth > 0.1)) return out;
+  const C = fp.buildingCorner;
+  const unit = (p, q, len) => {
+    const L = len || Math.hypot(q.x - p.x, q.z - p.z) || 1;
+    return { x: (q.x - p.x) / L, z: (q.z - p.z) / L };
+  };
+  const outA = unit(C, fp.nearOuterA, depth);
+  const outB = unit(C, fp.nearOuterB, depth);
+  // Along each wall from the corner = away from the other leg's outward side.
+  const alongA = { x: -outB.x, z: -outB.z };
+  const alongB = { x: -outA.x, z: -outA.z };
+  const sp = Math.max(1, Number(opts.spacingFt) || 5);
+  const rowsPerLeg = Math.max(0, Math.round(Number(opts.purlinRowsPerLeg) || 0));
+  const legs = [
+    { leg: 'A', len: Number(fp.lengthA) || 0, out: outA, along: alongA, stations: opts.stationsA },
+    { leg: 'B', len: Number(fp.lengthB) || 0, out: outB, along: alongB, stations: opts.stationsB },
+  ];
+  const at = (L, u, v) => ({
+    x: C.x + L.out.x * u + L.along.x * v,
+    z: C.z + L.out.z * u + L.along.z * v,
+    u,
+  });
+  for (const L of legs) {
+    const commons = Array.isArray(L.stations) && L.stations.length
+      ? L.stations
+      : L.len > 0.01
+        ? [0, L.len]
+        : [0];
+    for (const v of commons) {
+      if (v < -1e-6 || v > L.len + 1e-6) continue;
+      out.rafters.push({ leg: L.leg, kind: 'common', v, a: at(L, 0, v), b: at(L, depth, v) });
+      out.counts.common += 1;
+    }
+    for (let k = 1; k * sp < depth - 0.25; k += 1) {
+      const v = -k * sp;
+      out.rafters.push({ leg: L.leg, kind: 'jack', v, a: at(L, -v, v), b: at(L, depth, v) });
+      out.counts.jack += 1;
+    }
+    for (let r = 0; r < rowsPerLeg; r += 1) {
+      const u = (depth * (r + 0.5)) / rowsPerLeg;
+      out.purlins.push({ leg: L.leg, u, a: at(L, u, -u), b: at(L, u, L.len) });
+      out.counts.purlins += 1;
+    }
+  }
+  out.counts.rafters = out.counts.common + out.counts.jack;
+  out.hip = { a: { x: C.x, z: C.z, u: 0 }, b: { x: fp.outerCorner.x, z: fp.outerCorner.z, u: depth } };
+  return out;
+}

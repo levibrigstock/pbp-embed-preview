@@ -26,7 +26,7 @@ import {
   wrapFootprint,
   wrapOccupiedSpanOnWall,
   wallOutward,
-} from './wrapLean.js?v=20260923frameView1';
+} from './wrapLean.js?v=20260925frameAtt1';
 
 function num(v, d) {
   const n = Number(v);

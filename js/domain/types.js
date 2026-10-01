@@ -2,7 +2,8 @@
  * Post-frame domain primitives.
  * Dimensions are feet unless noted. Pitch is rise per 12" run.
  */
-import { normalizeColorPlan } from './colorPlan.js?v=20260923frameView1';
+import { normalizeColorPlan, COLOR_CODES } from './colorPlan.js?v=20260929ltstone1';
+import { cantileverEaveInRange } from './cantileverLean.js?v=20260924cant1';
 
 
 export const WALLS = ['front', 'back', 'left', 'right'];
@@ -48,10 +49,37 @@ export function openWallList(b) {
  return [];
 }
 
-/** True if this main wall is fully open (drive-through): no metal / girts / intermediate posts. */
+/**
+ * Loafing barn: ONE main wall with its wall metal, girts, wall trim / fasteners
+ * and door/window openings removed but the POST GRID KEPT (open side with posts
+ * only). Returns the wall name or null. Default null (off).
+ * A wall that is also a drive-through open wall (openWalls) stays drive-through
+ * (mid-posts removed) — drive-through wins.
+ */
+export function loafingWallOf(b) {
+  const w = b?.loafingWall;
+  return WALLS.includes(w) ? w : null;
+}
+
+/** True if `wall` is the loafing-barn open side (posts stay, skin/girts gone). */
+export function isLoafingWall(b, wall) {
+  return !!wall && loafingWallOf(b) === wall && !openWallList(b).includes(wall);
+}
+
+/** True if this wall is a drive-through open wall (mid-posts removed too). */
+export function isDriveThroughWall(b, wall) {
+  if (!wall || !WALLS.includes(wall)) return false;
+  return openWallList(b).includes(wall);
+}
+
+/**
+ * True if this main wall has no wall skin / girts / openings: a drive-through
+ * open wall (also no mid-posts) OR the loafing-barn side (posts kept).
+ * Use isDriveThroughWall for post-grid decisions.
+ */
 export function isWallOpen(b, wall) {
- if (!wall || !WALLS.includes(wall)) return false;
- return openWallList(b).includes(wall);
+  if (!wall || !WALLS.includes(wall)) return false;
+  return openWallList(b).includes(wall) || loafingWallOf(b) === wall;
 }
 
 /** Walls that still receive metal + girts + intermediate posts. */
@@ -160,6 +188,17 @@ export function createCrossGable(partial = {}) {
     postProtectors: partial.postProtectors ?? false,
     /** Perma-Column piers on standing entry-gable posts (projection > 0). */
     permaColumns: partial.permaColumns ?? false,
+    /**
+     * Sackcrete (3 × 80 lb bags per post) on the two standing entry-gable
+     * posts. Default on; old saves without the field = on. Ignored when
+     * projection ≈ 0 (no posts).
+     */
+    sackcrete: partial.sackcrete === true,
+    /**
+     * V braces (6x6 × 32" @ 45°) on standing entry-gable posts — two per post.
+     * Ignored when projection ≈ 0 (no posts).
+     */
+    vBraces: partial.vBraces ?? false,
   };
 }
 
@@ -345,12 +384,23 @@ export function createOpening(partial = {}) {
  const defaults = OPENING_TYPES[type] || OPENING_TYPES.walk;
  const defaultSill =
  type === 'window' ? 3 : 0;
- /** Finish color WH (white) or BK (black) for doors and windows. */
+ /**
+  * Finish colour.
+  *
+  * A SLIDING BARN DOOR takes the full panel palette — the same codes the wall
+  * and roof selectors offer — because the door is skinned in that same wall
+  * panel and Levi sells it in any of those colours. Walk doors, overheads and
+  * windows are manufactured units and stay WH / BK.
+  */
  const colorTypes =
  type === 'walk' || type === 'overhead' || type === 'slider' || type === 'window';
- let finishColor = String(partial.color || partial.doorColor || '').toUpperCase();
- if (finishColor === 'WHITE' || finishColor === 'AL' || finishColor === 'WH') finishColor = 'WH';
- else if (finishColor === 'BLACK' || finishColor === 'MB' || finishColor === 'BK') finishColor = 'BK';
+ const raw = String(partial.color || partial.doorColor || '').toUpperCase();
+ let finishColor;
+ if (raw === 'WHITE' || raw === 'WH') finishColor = 'WH';
+ else if (raw === 'BLACK' || raw === 'MB' || raw === 'BK') finishColor = 'BK';
+ else if (type === 'slider' && Object.prototype.hasOwnProperty.call(COLOR_CODES, raw))
+ finishColor = raw;
+ else if (raw === 'AL') finishColor = type === 'slider' ? 'AL' : 'WH';
  else finishColor = colorTypes ? 'WH' : '';
  const slideMode = normalizeSlideMode(partial.slideMode, type);
  const slideMount = normalizeSlideMount(partial.slideMount, type);
@@ -385,7 +435,7 @@ export function createOpening(partial = {}) {
  host: partial.host || 'main',
  /** Lean-to face when host is a lean-to id */
  face: partial.face || 'outer',
- /** Walk / garage / slider / window finish: 'WH' | 'BK' */
+ /** Walk / garage / window finish: 'WH' | 'BK'. Slider: any panel colour. */
  color: colorTypes ? finishColor || 'WH' : '',
  /**
    * Sliding barn door only: 'left' | 'right' | 'center'.
@@ -402,6 +452,17 @@ export function createOpening(partial = {}) {
    */
  installMode:
   String(partial.installMode || '').toLowerCase() === 'framed' ? 'framed' : 'installed',
+ /**
+   * Header lumber override set from 2D Edit > Framing. '' = automatic
+   * (production rule by opening type). Walk / overhead / slider headers only.
+   */
+ headerSize: ['2x6', '2x8', '2x10', '2x12'].includes(partial.headerSize)
+  ? partial.headerSize
+  : '',
+ /** Header plies override (1-3); 0 = automatic. */
+ headerPlies: [1, 2, 3].includes(Number(partial.headerPlies))
+  ? Number(partial.headerPlies)
+  : 0,
  };
 }
 
@@ -540,11 +601,46 @@ export function createLeanTo(partial = {}) {
  /** Perma-Column piers on this lean's posts (independent of main). Ignored for cantilever. */
  permaColumns: partial.permaColumns ?? false,
  /**
+     * Sackcrete (3 × 80 lb bags per in-ground post) on this lean's own posts.
+     * DEFAULT OFF, everywhere. Levi: "default sackcrete to no on all
+     * buildings/types." It bills three 80 lb bags per in-ground post, so
+     * defaulting it on put concrete on every quote whether or not the job was
+     * sold with it. The option is unchanged — only the answer it starts on.
+     *
+     * A saved job carries sackcrete explicitly, so this moves NEW work only
+     * and a quoted job reopens exactly as it was quoted.
+     *
+     * Main∩lean shared posts belong to the main building (main flag). Ignored
+     * for cantilever.
+     */
+ sackcrete: partial.sackcrete === true,
+ /**
+     * V braces (6x6 × 32" @ 45°) on this lean's posts — two per post (both sides).
+     * Ignored for cantilever (no posts). Independent of main; leanPosts already
+     * exclude shared main∩lean keys so takeoff does not double-bill.
+     *
+     * DEFAULT ON, unlike the main building, which defaults off. Levi: "V brace
+     * option on main structures is okay but default to no — usually we only use
+     * it on lean to's." A brace kicks from the post up to the beam it carries,
+     * and it is the open post-and-beam run of a lean that wants one, not a
+     * sheeted main wall.
+     *
+     * An old save carries vBraces explicitly, so this moves new leans only and
+     * leaves quoted jobs exactly as they were quoted.
+     */
+ vBraces: partial.vBraces ?? true,
+ /**
      * Shed lean: bill joist hangers at the ledger for each rafter station.
+     * Default YES for a new shed lean when the field is unset; explicit values are kept.
      * When true, lean rafter lumber size follows joistHangerSize (2x8|2x10).
      * Gable / wrap takeoff ignores this (no shed rafter stations billed).
      */
- joistHangers: partial.joistHangers === true,
+ joistHangers: typeof partial.joistHangers === 'boolean'
+ ? partial.joistHangers
+ : // Unset only: a new shed lean defaults to YES (Levi). A saved lean always carries
+   // an explicit true/false (this factory writes it), so quoted jobs are untouched.
+   // Gable extension / wrap never bill shed hangers, so they stay off.
+   !isWrap && roofStyle !== 'gable',
  /**
      * Hanger / rafter size when joistHangers is on. Same JOIST2810 SKU for both;
      * size still drives rafter lumber and BOM description.
@@ -619,6 +715,25 @@ export function createLeanTo(partial = {}) {
      */
  wallLiner,
  wallLinerColor: String(partial.wallLinerColor || 'AR').toUpperCase() || 'AR',
+ /**
+     * Sheet the MAIN building's wall behind this lean, default true.
+     *
+     * Levi: "under a lean-to, essentially a main building wall should by
+     * default have metal." The wall is still the building's skin — it stands
+     * between the building and the lean — so it carries metal unless somebody
+     * deliberately opens the two spaces into one.
+     *
+     * Only an ENCLOSED lean can turn it off. An open or cantilever lean leaves
+     * that wall exposed to weather and has always kept its metal.
+     *
+     * Some older jobs were ordered without it, so this is a per-lean choice
+     * rather than a global rule: the 55x80 reference order bills one eave wall
+     * where the building has two, and its fixture pins this to false to keep
+     * saying so.
+     */
+ sheetHostWall: partial.sheetHostWall !== false,
+ /** 2D Edit > Framing overrides for this lean (sparse; Auto = empty). */
+ framingEdits: normalizeLeanFramingEdits(partial.framingEdits),
  /** Concrete slab under lean footprint (independent of main hasSlab). */
  hasSlab: partial.hasSlab === true,
  /** Slab thickness (in). Defaults to main building slab when omitted. */
@@ -670,6 +785,21 @@ export function isLeanEnclosed(lean) {
  if (isLeanCantilever(lean)) return false;
  if (typeof lean.enclosed === 'boolean') return lean.enclosed;
  return lean.enclosure !== 'open' && lean.enclosure !== 'cantilever';
+}
+
+/**
+ * True when this lean leaves the main building's wall behind it BARE.
+ *
+ * Only an enclosed lean can: an open or cantilever one leaves that wall facing
+ * the weather, so it is always sheeted. And even an enclosed lean sheets it by
+ * default — the flag has to be turned off deliberately, which is Levi's rule
+ * that a wall under a lean has metal unless somebody opens the two spaces into
+ * one.
+ */
+export function leanBaresHostWall(lean) {
+ if (!lean) return false;
+ if (!isLeanEnclosed(lean)) return false;
+ return lean.sheetHostWall === false;
 }
 
 /** Operator-facing enclosure label: Enclosed | Open | Cantilever. */
@@ -948,6 +1078,8 @@ export function leanVisualOuterEaveFt(b, lean) {
   );
   const attach = leanToAttachHeight(b, lean);
   const continuousOuter = Math.max(8, mainE - designRise);
+  // Cantilever hanging under the main eave: the whole lean follows its eave.
+  if (isLeanCantilever(lean) && cantileverEaveInRange(b, lean)) return outer;
   // Same threshold as _addLeanTo (0.45′): not enough drop for pitch → drop outer
   if (Math.min(mainE, attach) < outer + 0.45) {
     return continuousOuter;
@@ -1045,6 +1177,14 @@ export function normalizePartOverrides(raw) {
  else if (v.gauge === '29' || v.gauge === 29) entry.gauge = '29';
  if (v.note) entry.note = String(v.note).slice(0, 200);
  if (v.label) entry.label = String(v.label).slice(0, 120);
+ // 2D Edit > Framing: absolute plan position (lean posts), per-post height, bracing
+ if (v.x != null && v.x !== '' && Number.isFinite(Number(v.x))) entry.x = roundPartFt(Number(v.x));
+ if (v.z != null && v.z !== '' && Number.isFinite(Number(v.z))) entry.z = roundPartFt(Number(v.z));
+ if (v.heightFt != null && v.heightFt !== '' && Number(v.heightFt) > 0 && Number.isFinite(Number(v.heightFt))) {
+  entry.heightFt = roundPartFt(Number(v.heightFt));
+ }
+ if (v.vBrace === 'on' || v.vBrace === 'off') entry.vBrace = v.vBrace;
+ if (v.knee === true) entry.knee = true;
  const wall = String(v.wall || '').toLowerCase();
  if (['front', 'back', 'left', 'right'].includes(wall)) entry.wall = wall;
  if (v.offsetFt != null && v.offsetFt !== '' && Number.isFinite(Number(v.offsetFt))) {
@@ -1060,6 +1200,19 @@ export function partOverride(building, partId) {
  const map = building.partOverrides;
  if (!map || typeof map !== 'object') return null;
  return map[partId] || null;
+}
+
+/** Per-post V-brace: 'on' / 'off' on the post wins, else the structure flag. */
+export function postHasVBrace(building, partId, structureOn) {
+ const v = partOverride(building, partId)?.vBrace;
+ if (v === 'on') return true;
+ if (v === 'off') return false;
+ return !!structureOn;
+}
+
+/** Knee braces (2D Edit > Framing) on this post. */
+export function postHasKneeBrace(building, partId) {
+ return partOverride(building, partId)?.knee === true;
 }
 
 export function isPartSuppressed(building, partId) {
@@ -1155,9 +1308,119 @@ export function resolvePostWorldPos(b, post) {
  const pos = wallOffsetToXZ(b, ov.wall || wall, offsetFt);
  return { x: pos.x, z: pos.z, wall: ov.wall || wall, offsetFt, partId, moved: true };
  }
+ if (ov && ov.x != null && ov.z != null) {
+ return { x: ov.x, z: ov.z, wall, offsetFt, partId, moved: true };
+ }
  return { x: ox, z: oz, wall, offsetFt, partId, moved: false };
 }
 
+
+/**
+ * 2D Edit > Framing: sparse, default-Auto overrides kept on the building.
+ * Anything absent = the production rule decides, so existing jobs bill and
+ * draw exactly as before.
+ *
+ *   lumber          { role: { size?, grade? } }  size from catalog sizes, grade 'yp' | 'treated'
+ *   girts           { wall: { levels:[ft…] } }   explicit girt heights (ft above grade) for that wall
+ *   purlinRunsFt    [ft…]                        explicit roof purlin rows (ft up the slope from the eave)
+ *   trussStationsFt [ft…]                        explicit truss positions along the building length
+ *   blockingQty     number | null                truss blocking board count
+ *   extraLumber     [{ label,size,grade,lengthFt,qty }]  free-form framing lumber (blocking, backing, …)
+ */
+export const FRAMING_LUMBER_ROLES = {
+  girt: 'Wall girts',
+  purlin: 'Roof purlins',
+  rafter: 'Trusses / rafters / fly rafters',
+  header: 'Door & window headers',
+  carrier: 'Truss bearers / carriers',
+  skirt: 'Skirt board',
+  stud: 'Wall studs (stud-frame)',
+  plate: 'Top & bottom plates (stud-frame)',
+  block: 'Truss blocking & bracing',
+  brace: 'Knee braces',
+};
+
+const FRAMING_SIZES = ['2x4', '2x6', '2x8', '2x10', '2x12'];
+
+function sortedUnique(arr, min, max) {
+  if (!Array.isArray(arr)) return null;
+  const a = arr.map(Number).filter((n) => Number.isFinite(n) && n >= min && n <= max).sort((x, y) => x - y);
+  return a.filter((n, i) => i === 0 || Math.abs(n - a[i - 1]) > 0.04).map((n) => Math.round(n * 100) / 100);
+}
+
+export function normalizeFramingEdits(raw) {
+  const out = { lumber: {}, girts: {}, purlinRunsFt: null, trussStationsFt: null, blockingQty: null, extraLumber: [] };
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [role, v] of Object.entries(raw.lumber || {})) {
+    if (!FRAMING_LUMBER_ROLES[role] || !v || typeof v !== 'object') continue;
+    const e = {};
+    if (FRAMING_SIZES.includes(v.size) && role !== 'post') e.size = v.size;
+    if (v.grade === 'yp' || v.grade === 'treated') e.grade = v.grade;
+    if (Object.keys(e).length) out.lumber[role] = e;
+  }
+  for (const [wall, v] of Object.entries(raw.girts || {})) {
+    if (!WALLS.includes(wall) || !v || !Array.isArray(v.levels)) continue;
+    out.girts[wall] = { levels: sortedUnique(v.levels, 0.2, 60) || [] };
+  }
+  out.purlinRunsFt = sortedUnique(raw.purlinRunsFt, 0, 200);
+  out.trussStationsFt = sortedUnique(raw.trussStationsFt, 0, 1000);
+  const bq = Number(raw.blockingQty);
+  out.blockingQty = raw.blockingQty != null && raw.blockingQty !== '' && Number.isFinite(bq) && bq >= 0 ? Math.round(bq) : null;
+  out.extraLumber = (Array.isArray(raw.extraLumber) ? raw.extraLumber : [])
+    .filter((x) => x && FRAMING_SIZES.includes(x.size) && Number(x.qty) > 0 && Number(x.lengthFt) > 0)
+    .map((x) => ({
+      label: String(x.label || 'Blocking').slice(0, 40),
+      size: x.size,
+      grade: x.grade === 'treated' ? 'treated' : 'yp',
+      lengthFt: Math.round(Number(x.lengthFt)),
+      qty: Math.min(999, Math.round(Number(x.qty))),
+    }));
+  return out;
+}
+
+/** True when the building carries any framing edit (Auto jobs stay untouched). */
+export function hasFramingEdits(b) {
+  const f = b?.framingEdits;
+  if (!f) return false;
+  return !!(
+    Object.keys(f.lumber || {}).length ||
+    Object.keys(f.girts || {}).length ||
+    f.purlinRunsFt ||
+    f.trussStationsFt ||
+    f.blockingQty != null ||
+    (f.extraLumber || []).length
+  );
+}
+
+/** Lumber override for a role: { size, treated } \u2013 null fields = Auto. */
+export function lumberEdit(b, role) {
+  const e = b?.framingEdits?.lumber?.[role];
+  return { size: e?.size || null, treated: e?.grade === 'treated' ? true : e?.grade === 'yp' ? false : null };
+}
+
+/** Effective size for a role: edit > the existing building field. */
+export function lumberSize(b, role, fallback) {
+  return lumberEdit(b, role).size || fallback;
+}
+
+/** Effective treated flag for a role: edit > the role default. */
+export function lumberTreated(b, role, dflt = false) {
+  const t = lumberEdit(b, role).treated;
+  return t == null ? dflt : t;
+}
+
+/** Per-lean edit block (sparse; empty = Auto). */
+export function normalizeLeanFramingEdits(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  const n = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.round(Number(v)) : null);
+  if (n(raw.purlinRows) != null && n(raw.purlinRows) > 0) out.purlinRows = n(raw.purlinRows);
+  if (n(raw.girtRows) != null) out.girtRows = n(raw.girtRows);
+  const st = sortedUnique(raw.rafterStationsFt, 0, 1000);
+  if (st && st.length) out.rafterStationsFt = st;
+  if (FRAMING_SIZES.slice(1).includes(raw.rafterSize)) out.rafterSize = raw.rafterSize;
+  return out;
+}
 
 /** Main building uses stud walls (no perimeter posts). */
 export function isStudFrame(b) {
@@ -1233,6 +1496,19 @@ export function createBuilding(partial = {}) {
      */
  permaColumns: partial.permaColumns ?? false,
  /**
+     * Sackcrete (3 × 80 lb bags per in-ground post) on this building's main
+     * posts, including main∩lean shared posts. Default on; old saves without
+     * the field = on. Lean-tos / wings / entry gables have their own flags
+     * (a wing / ell is a building, so this is its flag too).
+     */
+ sackcrete: partial.sackcrete === true,
+ /**
+     * V braces (6x6 × 32" @ 45°, SKU 6632VB) on this building's main posts.
+     * When on, each main post gets two braces (both sides along the wall).
+     * Lean-tos / wings / entry gables have their own flags.
+     */
+ vBraces: partial.vBraces ?? false,
+ /**
      * @deprecated Prefer openWalls. false = open left+right eaves when openWalls is absent.
      */
  sidewallMetal: partial.sidewallMetal ?? true,
@@ -1260,6 +1536,12 @@ export function createBuilding(partial = {}) {
  : partial.sidewallMetal === false
  ? ['left', 'right']
  : [],
+ /**
+     * Loafing barn open side: one main wall ('front'|'back'|'left'|'right')
+     * with no wall metal, girts, wall trim/fasteners or openings — posts stay.
+     * null = off (default; existing jobs unchanged).
+     */
+ loafingWall: WALLS.includes(partial.loafingWall) ? partial.loafingWall : null,
  /**
      * Truss carrier on eave walls (left & right): always 2-ply.
      * Size 2x10 or 2x12.
@@ -1331,6 +1613,13 @@ export function createBuilding(partial = {}) {
      */
  wallGauge: partial.wallGauge === 26 || partial.wallGauge === '26' ? '26' : '29',
  roofGauge: partial.roofGauge === 26 || partial.roofGauge === '26' ? '26' : '29',
+ /**
+  * Vented ridge cap. The ridge cap becomes a ridge VENT, and the closures
+  * under it become vented closures so the air the vent exists to move can
+  * actually get through — Levi: "when that happens the enclosures calculated
+  * for the ridge cap need to automatically be vented enclosures."
+  */
+ ventedRidge: partial.ventedRidge === true,
  /** Exterior metal trim color (ridge, eave, corner, base, etc.) */
  trimColor: partial.trimColor || 'BK',
  /**
@@ -1421,7 +1710,19 @@ export function createBuilding(partial = {}) {
      * (post:… / wall-panel:…). Values: { suppressed?, color?, gauge?, note? }.
      */
  partOverrides: normalizePartOverrides(partial.partOverrides),
- openings: (partial.openings || []).map(createOpening),
+ /** 2D Edit > Framing overrides (sparse; Auto = empty). */
+ framingEdits: normalizeFramingEdits(partial.framingEdits),
+ // Loafing barn open side has no wall to hang doors/windows on
+ openings: (partial.openings || [])
+ .map(createOpening)
+ .filter(
+ (o) =>
+ !(
+ WALLS.includes(partial.loafingWall) &&
+ (!o.host || o.host === 'main') &&
+ (o.wall || 'front') === partial.loafingWall
+ ),
+ ),
  /** Cross gables over entries — roof features, not buildings or lean-tos. */
  crossGables: (partial.crossGables || []).map(createCrossGable),
  leanTos: (partial.leanTos || []).map((lt) =>
@@ -1464,6 +1765,28 @@ export function createSiteProp(partial = {}) {
  };
 }
 
+
+/**
+ * Operator-added Job Review line (catalog pick or freeform).
+ * Survives save/load with the job; takeoff merges these after geometry lines.
+ */
+export function createExtraItem(partial = {}) {
+ const qty = Math.max(0, Number(partial.qty) || 1);
+ const cost = Math.max(0, Number(partial.cost) || 0);
+ return {
+ id: partial.id || uid('xitem'),
+ category: partial.category || 'Accessories',
+ usage: partial.usage || 'Manual',
+ sku: String(partial.sku || ''),
+ description: String(partial.description || 'Custom item'),
+ color: String(partial.color || ''),
+ length: String(partial.length || ''),
+ qty,
+ cost,
+ source: partial.source === 'catalog' ? 'catalog' : 'manual',
+ };
+}
+
 export function createProject(partial = {}) {
  const buildings = (partial.buildings || [createBuilding()]).map(createBuilding);
  const props = Array.isArray(partial.props)
@@ -1498,10 +1821,30 @@ export function createProject(partial = {}) {
  freightEscortRate: partial.freightEscortRate ?? 0,
  /** Sales tax rate % on materials + freight (default 9.5). */
  salesTaxPct: partial.salesTaxPct ?? 9.5,
+ /**
+  * Equipment (lift / machine rental) charge on the job.
+  * When true and equipmentAmount > 0, Job Review gets one EQUIP line.
+  * Old jobs without these fields default to No / $0 via ??.
+  */
+ equipment: partial.equipment === true,
+ /** Dollars, 0–10000 in $500 steps. Ignored when equipment is false. */
+ equipmentAmount: (() => {
+  const n = Math.round(Number(partial.equipmentAmount) || 0);
+  if (n <= 0) return 0;
+  const stepped = Math.round(n / 500) * 500;
+  return Math.max(0, Math.min(10000, stepped));
+ })(),
  buildings,
  activeBuildingId: partial.activeBuildingId || buildings[0].id,
  /** Site staging props (people, animals, trucks) */
  props,
+ /**
+  * Extra Job Review lines (catalog pick or manual). Persisted with the job;
+  * takeoffProject appends them to the item list and totals.
+  */
+ extraItems: Array.isArray(partial.extraItems)
+ ? partial.extraItems.map((x) => createExtraItem(x))
+ : [],
  /** Basic CRM fields (expandable later) */
  crm: {
  name: partial.crm?.name ?? partial.customer ?? '',

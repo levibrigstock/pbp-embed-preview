@@ -6,7 +6,7 @@
 import * as THREE from '../../vendor/three.module.js';
 // Relative vendor path so Safari embed does not depend on import maps for the viewer graph.
 import { OrbitControls } from '../../vendor/OrbitControls.js';
-import { generateFraming } from '../domain/framing.js?v=20260923houseWrap1';
+import { generateFraming } from '../domain/framing.js?v=20261001leancorner16b';
 import { frameEaveHeightFt } from '../domain/measure.js?v=20260923openOff1';
 import {
  roofRise,
@@ -22,6 +22,8 @@ import {
  isLeanEnclosed,
  isLeanCantilever,
  isWallOpen,
+ isDriveThroughWall,
+ loafingWallOf,
  openWallList,
  buildingIncludesRoofMetal,
  buildingIncludesWallMetal,
@@ -34,12 +36,15 @@ import {
  partOverride,
  isStudFrame,
  resolvePostWorldPos,
+  postHasVBrace,
+  postHasKneeBrace,
+  lumberEdit,
  normalizeSlideMode,
  frameOverhangEaveIn,
  frameOverhangGableIn,
  metalOverhangEaveIn,
  metalOverhangGableIn,
-} from '../domain/types.js?v=20260923houseWrap1';
+} from '../domain/types.js?v=20261001sakoff2';
 import {
  wallPanelBelowFloorIn,
  buildingCornerTrimSites,
@@ -50,8 +55,10 @@ import {
  gableFlyRafterQty,
  slicePanelsByCoverage,
  PANEL_COVERAGE_FT,
-} from '../domain/productionPolicy.js?v=20260923trim5';
-import { partColor } from '../domain/colorPlan.js?v=20260923frameView1';
+ leanEyebrowHeightFt,
+ leanContinuesMainRoofLine,
+} from '../domain/productionPolicy.js?v=20261001leancorner16b';
+import { partColor } from '../domain/colorPlan.js?v=20260929ltstone1';
 import {
  resolveSoffitFascia,
  eaveAssemblyFaceFt,
@@ -66,20 +73,27 @@ import {
  wrapHipSegment,
  wrapRoofUvCorners,
  wrapRoofSlopeRibStations,
-} from '../domain/wrapLean.js?v=20260923frameView1';
+} from '../domain/wrapLean.js?v=20260925frameAtt1';
 import {
  leanWingJunctions,
  clippedWrapFootprint,
  pointInsideLeanWingJunction,
  extendWrapFootprintIntoWing,
  wingEaveCutoutsForLeanJunctions,
-} from '../domain/leanWingJunction.js?v=20260923frameView1';
+} from '../domain/leanWingJunction.js?v=20260925frameAtt1';
+import { cantileverEaveInRange } from '../domain/cantileverLean.js?v=20260924cant1';
 import { ellGeometry, resolveEllPlacements } from '../domain/ell.js?v=20260923frameView1';
-import { crossGableGeometry } from '../domain/crossGable.js?v=20260917q';
+import { crossGableGeometry, crossGableFramingPlan } from '../domain/crossGable.js?v=20260925frameAtt1';
 import { buildSitePropMesh } from './props.js';
 import { perf } from '../perf/perfMonitor.js?v=20260909perf';
 
 const FT = 1;
+// Every main wall is modelled this far INSIDE the nominal building box — front
+// at z = 0.05, back at L - 0.05, left at x = 0.05, right at W - 0.05 — so the
+// wall metal reads a little inboard of the footprint line. A lean's END wall
+// meets one of those walls edge-on, so it has to sit in the same plane or its
+// outer face stands proud and the step catches the light as a vertical line.
+const MAIN_WALL_PLANE_INSET_FT = 0.05;
 
 /** Prefer r152+ colorSpace; fall back to deprecated encoding for older Three. */
 function setRendererOutputSRGB(renderer) {
@@ -156,7 +170,80 @@ const COLOR_HEX = {
  SL: 0x2a2e34,
  LB: 0x2e6fa8,
  CG: 0xd2b48c,
+ // Taupe: warm grayish tan, the usual post-frame "Taupe" chip (≈ LRV 30).
+ TP: 0xa39382,
+ // Colony Green: light, soft sage / grayish green (≈ LRV 44).
+ CN: 0xa5b593,
+ // Lt Stone (Light Stone): warm light beige-gray (≈ LRV 55); distinct from Clay (CG).
+ LS: 0xcfc5b0,
+ // Burnished Slate: dark brownish-gray slate (≈ LRV 9).
+ BS: 0x5a534d,
 };
+
+/**
+ * Bare (unpainted) metal — the only panel colour that should render metallic.
+ * Everything else in the palette is PAINTED steel.
+ */
+const BARE_METAL_HEX = new Set([COLOR_HEX.GAL]);
+
+/**
+ * Daylight rig for the full (desktop) viewer, tuned so a sunlit painted face
+ * renders close to its swatch hex and a shaded face stays readable, not black.
+ * Neutral-white sources: coloured sky/ground light (blue fill, green bounce)
+ * used to tint every panel. scripts/metal-colors-check.mjs pins these.
+ */
+const LIGHT = { ambient: 0.4, hemi: 1.35, sun: 2.3, fill: 0.6, rim: 0.3, bounce: 0.2 };
+/**
+ * Phone / lite rig: no environment map and no shadows, so the sky has to come
+ * from ambient + hemisphere. The old values (ambient 0.72, sun 1.35) left
+ * sunlit walls at roughly 40% of their swatch luminance on phones.
+ */
+const LITE_LIGHT = { ambient: 1.8, hemi: 1.1, sun: 2.2, fill: 0.3, rim: 0.2, bounce: 0.12 };
+const FULL_EXPOSURE = 1.0;
+/** Lite-only display floor for near-black painted panels (see _agPanelMat). */
+const LITE_DARK_FLOOR_HEX = 0x3a3b3e;
+const ENV_SKY_TOP = 0xd6e2ee;
+const ENV_SKY_BOTTOM = 0xcdc8bd;
+const ENV_INTENSITY = 0.6;
+
+/**
+ * Painted steel finish.
+ *
+ * A painted panel is a dielectric: the paint film scatters light diffusely in
+ * its own colour and adds a small, uncoloured specular sheen on top. It is not
+ * a metal. The skins used to be built at metalness 0.78–0.88, and in PBR a
+ * metal has almost no diffuse term — its colour comes from reflecting the
+ * environment. So a red wall showed a mirror of the sky gradient tinted red:
+ * faces turned away from the bright sky went near-black ("black bleeding
+ * through" the ribs), faces toward it washed to gray, and the shaded wall could
+ * read brighter than the sunlit one. Capping metalness here, at the one place
+ * every panel / trim material is built, fixes it for every colour at once
+ * instead of per piece. Rib depth still reads through the normal map and the
+ * clearcoat highlight.
+ */
+const PAINT_FINISH = {
+ metalness: 0.06,
+ roughnessMin: 0.42,
+ clearcoatMax: 0.18,
+ clearcoatRoughnessMin: 0.35,
+ envMapIntensityMax: 0.55,
+};
+
+/** @param {number} hexNum resolved 0xRRGGBB  @param {object} p material params */
+function paintedFinish(hexNum, p) {
+ if (BARE_METAL_HEX.has(hexNum >>> 0)) return p;
+ return {
+ ...p,
+ metalness: Math.min(p.metalness ?? PAINT_FINISH.metalness, PAINT_FINISH.metalness),
+ roughness: Math.max(p.roughness ?? PAINT_FINISH.roughnessMin, PAINT_FINISH.roughnessMin),
+ clearcoat: Math.min(p.clearcoat ?? 0, PAINT_FINISH.clearcoatMax),
+ clearcoatRoughness: Math.max(
+ p.clearcoatRoughness ?? PAINT_FINISH.clearcoatRoughnessMin,
+ PAINT_FINISH.clearcoatRoughnessMin,
+ ),
+ envMapIntensity: Math.min(p.envMapIntensity ?? 1, PAINT_FINISH.envMapIntensityMax),
+ };
+}
 
 export class SceneView {
  constructor(canvas, handlers = {}) {
@@ -173,6 +260,8 @@ export class SceneView {
  this.showMetal = true;
  this.presentationMode = false;
  this.autoOrbit = false;
+ /** OrbitControls autoRotateSpeed (persisted by UI). */
+ this.orbitSpinSpeed = 0.55;
  this.selectedOpeningId = null;
  this.selectedPropId = null;
  this._clock = new THREE.Clock();
@@ -312,9 +401,20 @@ export class SceneView {
  this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
  }
  // Lite/embed: no ACES — Filmic crush was turning Bright White gray/beige on phones.
- if (liteLike) {
+ if (liteLike && THREE.NeutralToneMapping != null) {
+ // Neutral does not crush white the way Filmic did, and it rolls off the
+ // brighter lite rig below instead of clipping sunlit roofs to flat white.
+ this.renderer.toneMapping = THREE.NeutralToneMapping;
+ this.renderer.toneMappingExposure = 1;
+ } else if (liteLike) {
  this.renderer.toneMapping = THREE.NoToneMapping;
  this.renderer.toneMappingExposure = 1;
+ } else if (THREE.NeutralToneMapping != null) {
+ // Neutral (Khronos PBR Neutral) keeps a surface's base colour through the
+ // tone curve. ACES Filmic at 1.18 exposure shifted hues and crushed
+ // saturated / mid colours toward gray-brown, so swatches never matched.
+ this.renderer.toneMapping = THREE.NeutralToneMapping;
+ this.renderer.toneMappingExposure = FULL_EXPOSURE;
  } else {
  this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
  this.renderer.toneMappingExposure = 1.18;
@@ -763,8 +863,11 @@ export class SceneView {
  new THREE.ShaderMaterial({
  side: THREE.BackSide,
  uniforms: {
- top: { value: new THREE.Color(0x4a8ec8) },
- bot: { value: new THREE.Color(0xd8e8c8) },
+ // Near-neutral sky dome for image lighting. A saturated blue top and
+ // green-tinted bottom used to tint every painted panel cyan/green
+ // (whites read #c2ccc4). Reflections still read sky-bright.
+ top: { value: new THREE.Color(ENV_SKY_TOP) },
+ bot: { value: new THREE.Color(ENV_SKY_BOTTOM) },
  },
  vertexShader: `
  varying vec3 vP;
@@ -795,7 +898,7 @@ export class SceneView {
  this._envMap = rt.texture;
  this.scene.environment = this._envMap;
  try {
- this.scene.environmentIntensity = 0.85;
+ this.scene.environmentIntensity = ENV_INTENSITY;
  } catch (_) {
  /* older three builds */
  }
@@ -807,18 +910,18 @@ export class SceneView {
 
  _lights() {
  // Lite/embed: neutral lights so white panels don't pick up sky blue.
- const amb = new THREE.AmbientLight(this.lite ? 0xfff8f0 : 0xd0e0f0, this.lite ? 0.72 : 0.22);
+ const amb = new THREE.AmbientLight(this.lite ? 0xf7f6f3 : 0xf4f4f2, this.lite ? LITE_LIGHT.ambient : LIGHT.ambient);
  this.scene.add(amb);
 
  const hemi = new THREE.HemisphereLight(
- this.lite ? 0xfffaf5 : 0xe8f2ff,
- this.lite ? 0xc8c0b0 : 0x5a7048,
- this.lite ? 0.38 : 0.62,
+ this.lite ? 0xfffaf5 : 0xf2f5fb,
+ this.lite ? 0xd2cec6 : 0xb4ab9a,
+ this.lite ? LITE_LIGHT.hemi : LIGHT.hemi,
  );
  this.scene.add(hemi);
 
  // Key sun
- this.sun = new THREE.DirectionalLight(this.lite ? 0xfff5ea : 0xfff2dc, this.lite ? 1.35 : 1.55);
+ this.sun = new THREE.DirectionalLight(this.lite ? 0xfff9f2 : 0xfff6ec, this.lite ? LITE_LIGHT.sun : LIGHT.sun);
  this.sun.position.set(55, 95, 38);
  if (!this.lite) {
  this.sun.castShadow = true;
@@ -839,17 +942,17 @@ export class SceneView {
  this.scene.add(this.sun.target);
 
  // Cool fill
- const fill = new THREE.DirectionalLight(this.lite ? 0xf0ebe4 : 0xb0ccf0, this.lite ? 0.18 : 0.42);
+ const fill = new THREE.DirectionalLight(this.lite ? 0xf0ebe4 : 0xe4ecf6, this.lite ? LITE_LIGHT.fill : LIGHT.fill);
  fill.position.set(-45, 35, -55);
  this.scene.add(fill);
 
  // Warm rim / bounce
- const rim = new THREE.DirectionalLight(this.lite ? 0xf0f0f0 : 0xffd8b0, this.lite ? 0.2 : 0.38);
+ const rim = new THREE.DirectionalLight(this.lite ? 0xf0f0f0 : 0xfff0e2, this.lite ? LITE_LIGHT.rim : LIGHT.rim);
  rim.position.set(-18, 28, 65);
  this.scene.add(rim);
 
  // Soft ground bounce
- const bounce = new THREE.DirectionalLight(this.lite ? 0xe0e0e0 : 0xc8d8a0, this.lite ? 0.12 : 0.18);
+ const bounce = new THREE.DirectionalLight(this.lite ? 0xe0e0e0 : 0xdcd6c8, this.lite ? LITE_LIGHT.bounce : LIGHT.bounce);
  bounce.position.set(10, -20, 10);
  this.scene.add(bounce);
  }
@@ -1014,7 +1117,10 @@ export class SceneView {
  } catch (_) {
  t.anisotropy = 4;
  }
- setTextureColorSpace(t, t === map);
+ // The rib shade map is a grayscale MULTIPLIER, i.e. data. Tagged sRGB it
+ // was decoded to linear first, so a 0.76 floor landed as ×0.54 and every
+ // mid/dark panel was darkened in its flats — the black bleeding through.
+ setTextureColorSpace(t, false);
  t.needsUpdate = true;
  }
 
@@ -1072,6 +1178,50 @@ export class SceneView {
  return metalInner + Number(memberHalfFt || 0) + gap;
  }
 
+ /**
+   * Seat a wall-plane point behind the skin on EVERY building face it sits on.
+   *
+   * The inset used to be applied for one wall only — whichever `placed.wall`
+   * named — so a CORNER post, which stands on two walls at once, was pushed in
+   * off one of them and left sticking through the other. A 6x6 centred on the
+   * wall plane overhangs it by 0.275', which is exactly what you see poking
+   * out of the metal at every corner in Skin + Frame.
+   *
+   * Derived from the point rather than from a wall label, because a corner post
+   * belongs to two walls and a label can only name one.
+   */
+ _seatBehindSkinXZ(x, z, b, memberHalfFt) {
+ // Seating only means something when there is metal to sit behind, and it
+ // applies in SKIN ONLY just as much as in Skin + Frame. A loafing barn keeps
+ // the posts down its open side in Skin only, and those at the corners also
+ // stand on a sheeted gable wall — centred on that wall plane they overhang it
+ // by half a post and came straight through the metal, which is what Levi saw.
+ if (!this.showMetal) return { x, z };
+ const metalInner = 0.13;
+ const gap = 1 / 12; // 1″ clearance past the metal inner face
+ const inset = metalInner + Math.max(0, Number(memberHalfFt) || 0) + gap;
+ const W = Number(b?.width) || 0;
+ const L = Number(b?.length) || 0;
+ const tol = 0.3;
+ let nx = Number(x) || 0;
+ let nz = Number(z) || 0;
+ // Only off a face that is SHEETED. On an open side there is no metal to hide
+ // behind and the post belongs on its line — pushing it in would shift a
+ // carport's columns off the grid they are actually set on.
+ const sheeted = (wall) => !isWallOpen(b, wall);
+ if (Math.abs(nx) < tol) {
+ if (sheeted('left')) nx += inset;
+ } else if (W > 0 && Math.abs(nx - W) < tol) {
+ if (sheeted('right')) nx -= inset;
+ }
+ if (Math.abs(nz) < tol) {
+ if (sheeted('front')) nz += inset;
+ } else if (L > 0 && Math.abs(nz - L) < tol) {
+ if (sheeted('back')) nz -= inset;
+ }
+ return { x: nx, z: nz };
+ }
+
  /** Pull skin toward camera so it wins depth ties vs coplanar framing. */
  _applySkinDepthBias(mat) {
  if (!mat || !this._skinPlusFrame()) return mat;
@@ -1120,17 +1270,24 @@ export class SceneView {
  const liteMetal = !!this.lite;
  const col = new THREE.Color(hex >>> 0);
  const lum = 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b;
- const mat = new THREE.MeshPhysicalMaterial({
- // Hue on the material; map is grayscale rib shade (see _agPanelMaps).
- color: col,
- map,
- normalMap,
- roughnessMap,
+ // Painted panels are paint, not bare metal (see PAINT_FINISH); Galvanized
+ // keeps its metallic look.
+ const fin = paintedFinish(hex >>> 0, {
  metalness: opts.metalness ?? (liteMetal ? 0 : 0.88),
  roughness: opts.roughness ?? (liteMetal ? 0.82 : 0.28),
  clearcoat: opts.clearcoat ?? (liteMetal ? 0 : 0.35),
  clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 1 : 0.28),
  envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0 : 1.15),
+ });
+ const mat = new THREE.MeshPhysicalMaterial({
+ // Hue on the material; map is grayscale rib shade (see _agPanelMaps).
+ color: col,
+ map,
+ normalMap,
+ // A roughness map multiplies material.roughness; painted panels drop it
+ // so the paint's own sheen is uniform (the map was tuned for bare metal).
+ roughnessMap: BARE_METAL_HEX.has(hex >>> 0) ? roughnessMap : null,
+ ...fin,
  normalScale: new THREE.Vector2(
  opts.normalStrength ?? (liteMetal ? 0.9 : 1.45),
  opts.normalStrength ?? (liteMetal ? 0.9 : 1.45),
@@ -1148,8 +1305,16 @@ export class SceneView {
  // BK/HG/etc. — slight lift so dark roof metal doesn't go flat gray
  mat.emissive = col.clone();
  mat.emissiveIntensity = lum > 0.4 ? 0.04 : 0.03;
+ } else if (lum < 0.02) {
+ // Near-black (Matte Black, Charcoal): the lite path has no sky
+ // reflection, so a true-black albedo rendered as a flat void with no
+ // form. Real black metal in daylight reads charcoal from its sheen;
+ // lift the albedo a little so sun / shade / ribs still separate.
+ mat.color = col.clone().lerp(new THREE.Color(LITE_DARK_FLOOR_HEX), 0.55);
  }
  }
+ // The swatch this panel stands for (colour checks sample against it).
+ mat.userData.swatchHex = hex >>> 0;
  this._applySkinDepthBias(mat);
  return mat;
  } catch (err) {
@@ -1160,15 +1325,21 @@ export class SceneView {
 
  _metalMat(hex, opts = {}) {
  // Trim / ridge / solid metal accents — lite/embed keeps colors readable on phone
- const col = new THREE.Color(this._colorFor(hex, 0xcccccc));
+ const hexNum = this._colorFor(hex, 0xcccccc);
+ const col = new THREE.Color(hexNum);
  const liteMetal = !!this.lite;
- return new THREE.MeshPhysicalMaterial({
- color: col,
+ let fin = {
  metalness: opts.metalness ?? (liteMetal ? 0.08 : 0.62),
  roughness: opts.roughness ?? (liteMetal ? 0.7 : 0.38),
  clearcoat: opts.clearcoat ?? (liteMetal ? 0 : 0.35),
  clearcoatRoughness: opts.clearcoatRoughness ?? (liteMetal ? 1 : 0.3),
  envMapIntensity: opts.envMapIntensity ?? (liteMetal ? 0 : 0.85),
+ };
+ // Painted trim is paint, not bare metal (see PAINT_FINISH).
+ if (!opts.bareMetal) fin = paintedFinish(hexNum, fin);
+ return new THREE.MeshPhysicalMaterial({
+ color: col,
+ ...fin,
  flatShading: false,
  transparent: opts.transparent ?? false,
  opacity: opts.opacity ?? 1,
@@ -1281,7 +1452,18 @@ export class SceneView {
  const ht = heightSeg.v1 - heightSeg.v0;
  if (ht < 0.08) return;
  const vMid = (heightSeg.v0 + heightSeg.v1) / 2;
- const t = d / span - 0.5;
+ // Keep the end ribs inside their own wall run.
+ //
+ // A rib is 0.14' thick along the wall, so one centred on d = 0 (or d = span)
+ // hangs half its body past the end of the run and pokes out through whatever
+ // wall meets it at that corner. At a normal building corner the corner trim
+ // caps it and nobody sees it. Where a lean's end wall butts the main wall the
+ // corner trim is relocated out to the lean, and the stub was left standing
+ // 0.04' proud of an otherwise flat facade — a hard vertical bar from eave to
+ // grade, exactly at the junction.
+ const ribHalf = major ? 0.07 : 0.035;
+ const dIn = Math.min(Math.max(d, ribHalf), Math.max(ribHalf, span - ribHalf));
+ const t = dIn / span - 0.5;
  let rib;
  if (isFrontBack) {
  rib = new THREE.Mesh(
@@ -1368,6 +1550,7 @@ export class SceneView {
  if (mode !== 'edit-part') {
  this._clearPartHover?.();
  }
+ this._syncOverhangTargetVisibility?.();
  }
 
  setPlaceOpeningDraft(draft) {
@@ -1395,6 +1578,19 @@ export class SceneView {
  this.autoOrbit = !!on;
  if (!this.webglOk || !this.controls) return;
  this.controls.autoRotate = this.autoOrbit;
+ }
+
+ /** Apply OrbitControls autoRotateSpeed (works even while spin is off). */
+ setAutoOrbitSpeed(n) {
+ const speed = Number(n);
+ if (!Number.isFinite(speed) || speed <= 0) return;
+ this.orbitSpinSpeed = speed;
+ if (!this.webglOk || !this.controls) return;
+ this.controls.autoRotateSpeed = speed;
+ }
+
+ getAutoOrbitSpeed() {
+ return this.orbitSpinSpeed;
  }
 
  resize() {
@@ -2024,7 +2220,7 @@ export class SceneView {
  // showFraming = posts + trusses + girts + purlins + truss bearers
  // When both on: full skin + full framing with depth bias / inset (no bleed)
  // open walls (drive-through): no metal/girts/intermediate posts on those faces
- const hasOpenWall = openWallList(b).length > 0;
+ const hasOpenWall = openWallList(b).length > 0 || !!loafingWallOf(b);
  if (this.showMetal) {
  this._addBuildingSkin(group, b, W, L, H, rise, oh, wallHex, roofHex);
  }
@@ -2073,7 +2269,12 @@ export class SceneView {
  this.showMetal &&
  !this.showFraming &&
  (b.ceilingLiner === 'yes' || b.ceilingLiner === true);
- if (!linerHidesTrusses) this._addInteriorRoofStructure(group, b);
+ // Skin only is METAL ONLY. The roof structure sits 0.28' under the pans, so
+ // drawing it while the skin fully covers it only risks lumber speckling through
+ // the ribs (depth precision / shadow) — nothing of it can legitimately be seen.
+ // Keep it only where the metal leaves it in view (open / loafing / drive-through wall).
+ const skinOnlyHidesRoofStructure = this.showMetal && !this.showFraming && !hasOpenWall;
+ if (!linerHidesTrusses && !skinOnlyHidesRoofStructure) this._addInteriorRoofStructure(group, b);
 
  // Wall framing: full when Frame on (incl. Skin + Frame) or skin off;
  // open-wall posts only when skin-only (closed-wall posts would bleed without inset).
@@ -2094,6 +2295,7 @@ export class SceneView {
  };
  const yAt = (t) => g.ridgeY - g.kGable * Math.abs(t - g.alongCentre);
  this._addCrossGablePosts(group, g, P, yAt, cg, trimHex);
+ this._addCrossGableFraming(group, b, g, P, cg);
  }
  }
  } else if (hasOpenWall) {
@@ -2111,6 +2313,18 @@ export class SceneView {
    * Near-invisible slabs along the overhang band (edit-part mode).
    * partId: overhang:eave | overhang:gable
    */
+ _overhangTargetsShown(partId) {
+ return this.mode === 'edit-part' || (!!partId && partId === this.selectedPartId);
+ }
+
+ _syncOverhangTargetVisibility() {
+ for (const m of this.partPickables || []) {
+ if (m?.userData?.partKind === 'overhang') {
+ m.visible = this._overhangTargetsShown(m.userData.partId);
+ }
+ }
+ }
+
  _addOverhangEditTargets(group, b, W, L, H, rise, oh) {
  const ohE = typeof oh === 'object' && oh ? Number(oh.eave) || 0 : Number(oh) || 0;
  const ohG = typeof oh === 'object' && oh ? Number(oh.gable) || 0 : Number(oh) || 0;
@@ -2131,6 +2345,13 @@ export class SceneView {
  label,
  buildingId: b.id,
  };
+ // These slabs are edit-part pick targets, not building. A 0.02-opacity blue
+ // slab at eave height, 0.35' proud of the gable walls, shows through as a
+ // faint grey horizontal band across the back/front gable wall (about a third
+ // of the way down from the peak) in Skin only. Only draw them while the
+ // user is actually editing parts (or one is selected). Raycasting ignores
+ // .visible, so picking still works.
+ mesh.visible = this._overhangTargetsShown(partId);
  group.add(mesh);
  this.partPickables.push(mesh);
  if (partId === this.selectedPartId) this._highlightPartMesh(mesh, true);
@@ -2442,6 +2663,9 @@ export class SceneView {
  }
 
  _addBuildingSkin(group, b, W, L, H, rise, oh, wallHex, roofHex) {
+ // Per-wall rib skip lists for gable ends; filled in the wall loop below and
+ // consumed by _addGableEndUpperMetal, which draws those walls' ribs.
+ this._gableRibSkip = {};
  const ohE = typeof oh === 'object' && oh ? Number(oh.eave) || 0 : Number(oh) || 0;
  const ohG = typeof oh === 'object' && oh ? Number(oh.gable) || 0 : Number(oh) || 0;
 
@@ -2656,7 +2880,9 @@ export class SceneView {
  }
 
  // Ribs: skip openings + suppressed Advanced Edit panels (true cutout).
- if (!isGableEnd) {
+ // Gable ends draw ribs in _addGableEndUpperMetal (continuous through the
+ // eave), so for them the skip list is stashed for that routine instead.
+ {
  const ribWdef = {
  wall: wdef.wall,
  w: wdef.span,
@@ -2718,14 +2944,11 @@ export class SceneView {
  sillHeight: 0,
  });
  }
- this._addAgRibs(
- group,
- ribWdef,
- wallHex,
- 3,
- 0.75,
- ribSkip,
- );
+ if (isGableEnd) {
+ this._gableRibSkip[wdef.wall] = ribSkip;
+ } else {
+ this._addAgRibs(group, ribWdef, wallHex, 3, 0.75, ribSkip);
+ }
  }
 
  // Wainscot transition strip (trim color) along band top where metal exists
@@ -3037,7 +3260,36 @@ export class SceneView {
  // Frame only draw them via showFraming / the Frame-only call below.
  if (this.showFraming) {
  this._addCrossGablePosts(group, g, P, yAt, cg, trimHex);
+ this._addCrossGableFraming(group, b, g, P, cg);
  }
+ }
+
+ /**
+   * Entry / cross gable roof framing (Frame views): ridge, gable-end rafter
+   * pair, header over the posts when it projects, purlins on both slopes.
+   * Draws crossGableFramingPlan (js/domain/crossGable.js) exactly.
+   */
+ _addCrossGableFraming(group, b, g, P, cg) {
+  const plan = crossGableFramingPlan(g, { purlinSpacingFt: (Number(b?.purlinSpacingIn) || 24) / 12 });
+  const wood = new THREE.MeshStandardMaterial({
+   color: 0xc49a6c,
+   roughness: 0.68,
+   metalness: 0.02,
+   emissive: 0x2a1808,
+   emissiveIntensity: 0.08,
+  });
+  const purlinMat = new THREE.MeshStandardMaterial({ color: 0xc4a882, roughness: 0.72, metalness: 0.02 });
+  const beam = (m, kind, mat, thick, face, drop) => {
+   const a = P(m.a.t, m.a.d, m.a.y - drop);
+   const c = P(m.b.t, m.b.d, m.b.y - drop);
+   const mesh = this._woodBeam(group, a[0], a[1], a[2], c[0], c[1], c[2], mat, thick, face);
+   if (mesh) mesh.userData = { frameMember: kind, crossGableId: cg?.id || null };
+  };
+  const nest = 0.14;
+  if (plan.ridge) beam(plan.ridge, 'ridge', wood, 1.5 / 12, 9.25 / 12, nest + 9.25 / 24);
+  for (const r of plan.rafters) beam(r, 'rafter', wood, 1.5 / 12, 7.25 / 12, nest + 7.25 / 24);
+  if (plan.header) beam(plan.header, 'header', wood, 3 / 12, 9.25 / 12, nest + 9.25 / 24);
+  for (const p of plan.purlins) beam(p, 'purlin', purlinMat, 3 / 12, 5.5 / 12, nest + 5.5 / 24);
  }
 
  /**
@@ -3051,6 +3303,7 @@ export class SceneView {
  const T = 0.5; // 6x6
  const half = g.widthFt / 2;
  const c = g.alongCentre;
+ const vbPosts = [];
  for (const side of [-1, 1]) {
  const t = c + side * (half - T / 2);
  const top = yAt(t);
@@ -3062,6 +3315,19 @@ export class SceneView {
  if (this._skinPlusFrame()) post.renderOrder = 1;
  post.userData = { kind: 'crossGablePost', crossGableId: cg?.id };
  group.add(post);
+ if (cg?.vBraces) {
+  vbPosts.push({
+   x: foot[0],
+   z: foot[2],
+   wall: g.wall,
+   heightAboveGrade: postH,
+  });
+ }
+ }
+ if (vbPosts.length) {
+  this._addPostVBraces(group, vbPosts, {
+   eaveFt: Math.max(...vbPosts.map((p) => p.heightAboveGrade)),
+  });
  }
  }
 
@@ -3371,7 +3637,14 @@ export class SceneView {
  // Top-of-wall eave band on OUTER face — free spans only (corner leg insets).
  // Flush shed / gable / ell spans omitted so the band does not sit on pans;
  // stepped shed leans keep the band continuous with the drip above.
- if (!isWallOpen(b, wallName)) {
+ //
+ // A LOAFING wall still gets the band. isWallOpen is true for both a
+ // drive-through and a loafing side, but they are not the same thing: a
+ // drive-through has nothing along that line, while a loafing side keeps its
+ // posts and the beam they carry, and the roof still drains over it. The
+ // takeoff has always known this — it bills the same 8 EaveEdge either way —
+ // so the band was ordered and then not drawn.
+ if (!isDriveThroughWall(b, wallName)) {
  const bandSegs = !occ.some((s) => s.omitMainEaveTrim)
  ? [{ start: leg - T * 1.2, end: L - (leg - T * 1.2) }]
  : freeBand.map((s) => {
@@ -3464,14 +3737,23 @@ export class SceneView {
  const bandLen = Math.hypot(run, rise * (run / Math.max(W / 2, 0.01)));
  const y0 = yWallAt(x0);
  const y1 = yWallAt(x1);
- // Hang below roof line the same way the eave band hangs below H
+ // Hang FULLY below the roof line.
+ //
+ // At 0.42 of its own height, 8% of the band stood proud of the roof plane,
+ // and that sliver's top face — pointing straight up the rake — caught the sun
+ // and read as a hard gold stripe running the whole rake, the length of the
+ // building. On a real barn the rake trim tucks under the panel edge; there is
+ // nothing up there to light.
+ //
+ // Half its height puts the top face exactly on the roof plane, which would
+ // z-fight it, so it goes a hair further under.
  const band = new THREE.Mesh(
  new THREE.BoxGeometry(bandLen, eaveBandH, T),
  partMat('topOfWall'),
  );
  band.position.set(
  (x0 + x1) / 2,
- (y0 + y1) / 2 - eaveBandH * 0.42,
+ (y0 + y1) / 2 - eaveBandH * 0.54,
  outerZ(end.zWall, end.oz),
  );
  band.rotation.z = angSign * wallAng;
@@ -3504,7 +3786,19 @@ export class SceneView {
  // Always seal under main OH — including lean-covered halves — so trim
  // does not stop at lean start and open a look-into-building pocket.
  // Wall-face rake band above still omits lean halves (#62).
- {
+ //
+ // ONLY UNDER A FRAMED OVERHANG. A soffit closes in the underside of roof
+ // framing that oversails the wall; a metal-only drip is just the panel
+ // hanging past its own edge, with nothing beneath it to cover. The app draws
+ // that line at 6" everywhere else ("under 6\" is a drip, not a framed
+ // overhang"), and the takeoff bills no soffit for one.
+ //
+ // `oh.gable` is framed PLUS metal, so it reads 0.25' on a building with no
+ // framed overhang at all — the standard 3" drip. Keying the pan off that
+ // drew a soffit nobody ordered, and because a soffit takes the WALL colour
+ // rather than the trim colour it showed as a cream stripe running the whole
+ // rake, between the black trim and the roof panels.
+ if (frameOverhangGableIn(b) >= 6) {
  const panDepth = Math.max(ohE + out, 0.2);
  const pan = new THREE.Mesh(
  new THREE.BoxGeometry(dripLen * 0.98, lipThk, panDepth),
@@ -3985,17 +4279,10 @@ export class SceneView {
  group.add(mesh);
 
  // Continuous ribs through eave — same formula as lower-wall _addAgRibs
- this._addGableEndRibs(
- group,
- wall,
- W,
- H,
- rise,
- z,
- wallHex,
- wallOpen ? H : 0,
- openings,
- );
+ // Sheets removed in 2D Edit / Advanced Edit (stashed by the wall loop) are
+ // cut out of the ribs too, so an open bay has no stray rib lines.
+ const ribOpenings = openings.concat(this._gableRibSkip?.[wall] || []);
+ this._addGableEndRibs(group, wall, W, H, rise, z, wallHex, wallOpen ? H : 0, ribOpenings);
 
  if (wallOpen) {
  const trimHex = this._colorFor(b.trimColor || b.roofColor || 'BK', 0x2a2a2a);
@@ -4037,8 +4324,14 @@ export class SceneView {
  new THREE.BoxGeometry(major ? 0.14 : 0.07, ht, major ? 0.28 : 0.2),
  major ? majorMat : minorMat,
  );
+ // Same clamp as _addAgRibs: an end rib centred on d = 0 (or d = W) hangs
+ // half its body past the end of the gable wall and pokes out through the
+ // eave wall that meets it there. A corner trim normally caps it; where a
+ // lean's end wall butts the main wall instead, nothing does.
+ const ribHalf = major ? 0.07 : 0.035;
+ const dIn = Math.min(Math.max(d, ribHalf), Math.max(ribHalf, W - ribHalf));
  rib.position.set(
- d,
+ dIn,
  (v0 + v1) / 2,
  z + (isFront ? (major ? 0.12 : 0.1) : major ? -0.12 : -0.1),
  );
@@ -4358,8 +4651,9 @@ export class SceneView {
  const caseCol = selected ? 0xf59e0b : trimHex;
  const caseMat = new THREE.MeshStandardMaterial({
  color: caseCol,
- metalness: 0.55,
- roughness: 0.35,
+ // Painted trim (see PAINT_FINISH) — was 0.55 metal, read dark off-sky.
+ metalness: PAINT_FINISH.metalness,
+ roughness: PAINT_FINISH.roughnessMin,
  emissive: selected ? 0x5c2a00 : 0x000000,
  emissiveIntensity: selected ? 0.25 : 0,
  });
@@ -4439,9 +4733,9 @@ export class SceneView {
  : this._colorFor('WH', 0xf5f5f2);
  const doorSkin = new THREE.MeshStandardMaterial({
  color: doorCol,
- metalness: doorCode === 'BK' ? 0 : 0.45,
- roughness: doorCode === 'BK' ? 0.92 : 0.4,
- envMapIntensity: doorCode === 'BK' ? 0 : 1,
+ metalness: doorCode === 'BK' ? 0 : PAINT_FINISH.metalness,
+ roughness: doorCode === 'BK' ? 0.92 : PAINT_FINISH.roughnessMin,
+ envMapIntensity: doorCode === 'BK' ? 0 : PAINT_FINISH.envMapIntensityMax,
  });
  const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.985, h * 0.985, 0.12), doorSkin);
  door.position.z = 0.15;
@@ -4449,7 +4743,7 @@ export class SceneView {
  g.add(door);
  const groove = new THREE.MeshStandardMaterial({
  color: new THREE.Color(doorCol).offsetHSL(0, 0, -0.12),
- metalness: 0.4,
+ metalness: PAINT_FINISH.metalness,
  roughness: 0.5,
  });
  const panelW = w * 0.72;
@@ -4628,7 +4922,7 @@ export class SceneView {
  const ribMat = new THREE.MeshStandardMaterial({
  color: new THREE.Color(wallHex).offsetHSL(0, 0, -0.08),
  roughness: 0.5,
- metalness: 0.4,
+ metalness: PAINT_FINISH.metalness,
  });
  const ribs = 4;
  for (let i = 1; i < ribs; i++) {
@@ -4800,7 +5094,11 @@ export class SceneView {
  metalness: 0.05,
  });
  const postW = 0.5 * FT; // 6x6 visual
- for (const p of pkg.posts) {
+ for (const p0 of pkg.posts) {
+ // Moved / suppressed posts (2D Edit) follow the same part id as the takeoff.
+ const pl = resolvePostWorldPos(b, p0);
+ if (isPartSuppressed(b, pl.partId)) continue;
+ const p = pl.moved ? { ...p0, x: pl.x, z: pl.z } : p0;
  // Omit posts that fall inside a wing footprint on this host.
  if (pointInsideLeanWingJunction(junctions, p.x, p.z)) continue;
  const ht = (Number(p.heightAboveGrade) || lt.eaveHeight || 10) * FT;
@@ -4879,13 +5177,23 @@ export class SceneView {
  new THREE.BoxGeometry(0.2 * FT, 0.35 * FT, hLen * FT),
  hipMat,
  );
- hipMesh.position.set(hx * FT, hy * FT, hz * FT);
+ // Nest under the pans (was centred on the roof line and read through the
+ // hip in Skin + Frame).
+ hipMesh.position.set(hx * FT, (hy - leanUnderRoof - 0.35 / 2) * FT, hz * FT);
  hipMesh.quaternion.setFromUnitVectors(
  new THREE.Vector3(0, 0, 1),
  new THREE.Vector3(dx, dy, dz).normalize(),
  );
  hipMesh.castShadow = true;
+ hipMesh.userData = { frameMember: 'hipRafter', leanToId: lt.id };
  group.add(hipMesh);
+ this._addWrapRoofFraming(group, pkg.materials?.wrapFraming, {
+  depth: fpBase.depth,
+  attachY: hAtMain,
+  outerY: outerWallTop,
+  nestFt: leanUnderRoof / FT,
+  leanToId: lt.id,
+ });
  }
 
  // Two shed roof planes meeting at hip.
@@ -4944,12 +5252,9 @@ export class SceneView {
  new THREE.Vector3(hip.a.x * FT, hip.a.y * FT + 0.04, hip.a.z * FT),
  new THREE.Vector3(hip.b.x * FT, hip.b.y * FT + 0.04, hip.b.z * FT),
  ];
- const ridgeGeo = new THREE.BufferGeometry().setFromPoints(ridgePts);
- const ridgeLine = new THREE.Line(
- ridgeGeo,
- new THREE.LineBasicMaterial({ color: trimHex, linewidth: 2 }),
- );
- group.add(ridgeLine);
+ // A real (thin) trim strip, not a GL line: lines have no depth offset, so they
+ // z-fight the roof pans and read as dashed black scratches.
+ this._trimStrip(group, ridgePts[0], ridgePts[1], trimHex);
 
  // Open-porch styling: end triangles at free ends + eyebrow on outer L
  const suppressEndA = junctions.some(
@@ -5209,7 +5514,10 @@ export class SceneView {
  let hAtMain = isGable
  ? Math.max(H, attachH)
  : Math.min(mainH, leanToAttachHeight(b, lt) * FT);
- if (!isGable && hAtMain < hAtOuter + 0.45 * FT) {
+ // Cantilever under the main eave: ledger at eave + rise, whole lean slides
+ // with lt.eaveHeight — never snap it back to the main-eave plane.
+ const cantInRange = isLeanCantilever(lt) && cantileverEaveInRange(b, lt);
+ if (!isGable && !cantInRange && hAtMain < hAtOuter + 0.45 * FT) {
  // Prefer attach at main eave; drop outer for pitch (continuous when matched)
  hAtMain = mainH;
  hAtOuter = Math.max(8 * FT, hAtMain - designRiseFt * FT);
@@ -5290,6 +5598,38 @@ export class SceneView {
  hAtMain,
  outerWallTop,
  );
+ }
+ // V braces on lean posts (structure flag; cantilever has none)
+ const leanAnyOv = Object.values(b.partOverrides || {}).some((o) => o && (o.vBrace === 'on' || o.knee === true));
+ if ((lt.vBraces || leanAnyOv) && !cantilever) {
+  const leanPid = (p) => postPartId(p.x, p.z, p.leanToId ? `lean:${p.leanToId}` : 'main');
+  const leanKnee = (framing.leanPosts || [])
+   .filter((p) => p.leanToId === lt.id && !isPartSuppressed(b, leanPid(p)) && postHasKneeBrace(b, leanPid(p)))
+   .map((p) => ({
+    x: p.x,
+    z: p.z,
+    wall: (Array.isArray(p.walls) ? p.walls[0] : p.walls) || lt.wall,
+    heightAboveGrade: p.heightAboveGrade || outerWallTop / FT,
+   }));
+  this._addPostKneeBraces(group, leanKnee, {
+   eaveFt: outerWallTop / FT,
+   faceFt: this._lumberFaceFt(lumberEdit(b, 'brace').size || '2x6'),
+  });
+  const leanVb = (framing.leanPosts || [])
+   .filter((p) => !p.leanToId || p.leanToId === lt.id)
+   .filter((p) => {
+    const pid = leanPid(p);
+    return !isPartSuppressed(b, pid) && postHasVBrace(b, pid, lt.vBraces);
+   })
+   .map((p) => ({
+    x: p.x,
+    z: p.z,
+    wall: (Array.isArray(p.walls) ? p.walls[0] : p.walls) || lt.wall,
+    heightAboveGrade: p.heightAboveGrade || outerWallTop / FT,
+   }));
+  this._addPostVBraces(group, leanVb, {
+   eaveFt: outerWallTop / FT,
+  });
  }
  }
 
@@ -5495,8 +5835,26 @@ export class SceneView {
  ['rightEnd', innerEnd, outerEnd],
  ]) {
  const faceOpen = isLeanFaceOpen(lt, face);
- const aIn = nudge(aInRaw);
- const aOut = { x: aOutRaw.x, z: aOutRaw.z };
+
+ // Outward normal for this end face.
+ let enx = 0;
+ let enz = 0;
+ if (lt.wall === 'left' || lt.wall === 'right') {
+ enz = face === 'leftEnd' ? -1 : 1;
+ } else {
+ enx = face === 'leftEnd' ? -1 : 1;
+ }
+
+ // Seat the end wall in the main wall's plane, and BUTT it — do not lap in.
+ //
+ // The roof still laps `inLap` into the host wall (i1/i2 above): it has to
+ // seal over the main wall's metal. An end wall has nothing to seal. Once it
+ // shares the main wall's plane the two sheets meet on the building line the
+ // way they do in the field, with corner trim over the seam; a 0.34' lap past
+ // that line would just be two coplanar sheets fighting for the same pixels,
+ // and it used to push the first rake rib inside the building.
+ const aIn = this._seatOnMainWallPlane(aInRaw, enx, enz);
+ const aOut = this._seatOnMainWallPlane(aOutRaw, enx, enz);
  const pickH = Math.max(hAtMain, outerWallTop);
  const sx = ((aInRaw.x + aOutRaw.x) / 2) * FT;
  const sz = ((aInRaw.z + aOutRaw.z) / 2) * FT;
@@ -5530,17 +5888,6 @@ export class SceneView {
  this.pickables.push(pick);
 
  if (faceOpen || !enclosedWallMetal) continue;
-
- // Outward normal for end face
- let enx = 0;
- let enz = 0;
- if (lt.wall === 'left' || lt.wall === 'right') {
- enx = 0;
- enz = face === 'leftEnd' ? -1 : 1;
- } else {
- enx = face === 'leftEnd' ? -1 : 1;
- enz = 0;
- }
 
  // Shed end-triangle metal: when off, sheet end walls only to outer eave
  // (rectangle); when on, full rake under the roof (includes brace triangles).
@@ -5596,8 +5943,8 @@ export class SceneView {
  );
  this._addLeanEndWainscotRect(
  group,
- aInRaw,
- aOutRaw,
+ aIn,
+ aOut,
  wainH,
  endWainMat,
  enx,
@@ -5607,8 +5954,8 @@ export class SceneView {
  );
  this._addLeanWainscotTrimStrip(
  group,
- aInRaw,
- aOutRaw,
+ aIn,
+ aOut,
  wainH,
  trimHex,
  enx,
@@ -5699,10 +6046,12 @@ export class SceneView {
  let enz = 0;
  if (isSide) enz = face === 'leftEnd' ? -1 : 1;
  else enx = face === 'leftEnd' ? -1 : 1;
+ // Same junction as an enclosed lean's end wall: share the main wall's
+ // plane and butt on the building line instead of lapping 0.34' past it.
  this._addLeanEndWallRake(
  group,
- nudge(aInRaw),
- { x: aOutRaw.x, z: aOutRaw.z },
+ this._seatOnMainWallPlane(aInRaw, enx, enz),
+ this._seatOnMainWallPlane(aOutRaw, enx, enz),
  hAtMain - leanUnderRoof,
  outerSkinTop,
  null,
@@ -5726,14 +6075,18 @@ export class SceneView {
  }
  }
 
- // Outer eave eyebrow over the 2-ply rafter bearer — nest under pans so
- // cream wall metal does not z-fight through open-shed roof (white dashes).
+ // Outer eave eyebrow: the band over the rafter bearer AND the rafter heel
+ // sitting on it — the same height the takeoff orders. Nested under the pans
+ // so cream wall metal does not z-fight through the open-shed roof.
  this._addLeanEyebrow(
  group,
  o1,
  o2,
  outerSkinTop,
- this._bearerDepthFt(lt.rafterBearerSize),
+ leanEyebrowHeightFt(
+ pkg.materials?.outerBearerSize || b.trussCarrierSize || '2x10',
+ pkg.materials?.cantileverRafterSize || '2x8',
+ ),
  openWallHex,
  oxu,
  ozu,
@@ -5764,12 +6117,18 @@ export class SceneView {
  this._addLeanRafters(group, i1, i2, o1, o2, hAtMain, hAtOuter, length, {
   spacingFt: leanRafterSp,
   nestFt: leanUnderRoof / FT,
+  stations: isGable ? null : pkg.materials?.leanRafterStationsFt,
+  leanToId: lt.id,
   isGable,
   gablePeakY: gablePeakY,
   gableEaveY: gableEaveY != null ? gableEaveY : outerWallTop,
   sizeLabel: cantilever ? '2x8' : '2x6',
+  sizeOverride: lt.framingEdits?.rafterSize || lumberEdit(b, 'rafter').size || null,
  });
- this._addLeanPurlins(group, i1, i2, o1, o2, hAtMain, hAtOuter, depth, length);
+ this._addLeanPurlins(group, i1, i2, o1, o2, hAtMain, hAtOuter, depth, length, {
+  rows: isGable ? 0 : Number(pkg.materials?.purlinRows) || 0,
+  leanToId: lt.id,
+ });
  }
 
  // Roof metal + trim only when skin is on and job includes roof metal
@@ -5785,15 +6144,25 @@ export class SceneView {
  const eaveA = { x: o1x, z: o1z };
  const eaveB = { x: o2x, z: o2z };
 
- // Roof heights — shed attach:
- //   same pitch as main → flush with main eave plane (one continuous slope).
- //   broken pitch → nest under main soffit pan so the eave pocket seals.
+ // Roof heights — shed attach.
+ //
+ // A shed lean on an eave wall that STARTS at the main eave shares that edge
+ // with the main roof, and the two mesh there: one surface that kinks if the
+ // pitches differ, not two roofs that overlap. Levi: "if the program
+ // recognizes a lean to and main building share an edge it should auto mesh —
+ // I shouldn't have to select."
+ //
+ // This used to give the flush treatment only when the PITCHES matched, and
+ // tucked every broken-pitch lean under the main soffit pan instead. A 2/12
+ // lean off a 4/12 roof line came out buried under the main eave rather than
+ // meeting it, which is not how it goes together in the field.
+ //
  // Main under-eave soffit still runs across the lean span (seals OH pocket);
  // only the wall-face eave band is omitted on lean pans (#62).
- const pitchMatch = !isGable && leanPitchMatchesMain(b, lt);
+ const sharesMainEdge = !isGable && leanContinuesMainRoofLine(b, lt);
  const roofYIn = isGable
  ? Math.max(mainH, H) + 0.02
- : pitchMatch
+ : sharesMainEdge
  ? Math.min(mainH, hAtMain) + 0.02
  : Math.min(mainH - 0.08, hAtMain - 0.04);
  const slopeOut =
@@ -5848,7 +6217,6 @@ export class SceneView {
  this._addLeanTransitionFlash(group, innerStart, innerEnd, roofYIn, isSide, trimHex, {
  mainEaveY: mainH,
  wall: lt.wall,
- pitchMatch,
  inLapIn: inLap * 12,
  });
  this._addLeanOuterEaveFascia(group, eaveA, eaveB, roofYOutTip, trimHex, {
@@ -6547,15 +6915,29 @@ export class SceneView {
  const ht = (hi - lo) * FT;
  const cx = ax + ux * d;
  const cz = az + uz * d;
- // Proud enough to read like sales reference corrugation (still under wainscot)
- const inOff = major ? 0.02 : 0.015;
+ // The rib must stay BURIED inside the skin, exactly like the main building's
+ // ribs (_addAgRibs puts those 0.1-0.12' inward of the wall plane).
+ //
+ // History: these boxes used to sit centred on the wall line, with `deep`
+ // (0.14-0.2') thicker than the 0.16' wall slab, so the dark metal poked
+ // through the skin as thin black vertical lines on every enclosed lean wall
+ // (the "black dashes" on the lean-to in Skin only). Pushing them proud (the
+ // previous fix) only made the ribs bigger: a proud 0.85-metalness box face
+ // reflects the dark environment and reads as a black line down every bay,
+ // while the main wall shows NO box ribs at all (its rib look is the panel
+ // texture + normal map). So: bury them. Outer face ends 0.05' under the skin.
  const thick = major ? 0.16 : 0.09;
  const deep = major ? 0.2 : 0.14;
+ const buriedOut = 0.03 - deep / 2;
  const mesh = new THREE.Mesh(
  new THREE.BoxGeometry(thick, ht * 0.98, deep),
  major ? majorMat : minorMat,
  );
- mesh.position.set(cx - nx * inOff, ((lo + hi) / 2) * FT, cz - nz * inOff);
+ mesh.position.set(
+ cx + nx * buriedOut,
+ ((lo + hi) / 2) * FT,
+ cz + nz * buriedOut,
+ );
  mesh.quaternion.copy(quat);
  mesh.castShadow = true;
  group.add(mesh);
@@ -6783,21 +7165,17 @@ export class SceneView {
    * @param {number} [yBottom=0] — bottom of upper wall (wainscot top when wainscot on)
    * @param {number} [wallHex] — wall color for material (preferred over shared mat)
    */
- /**
-  * Nominal 2x lumber depth in feet (actual dressed size).
-  * The outer rafter bearer is what the eave eyebrow metal wraps, so the band
-  * height follows the bearer the shop actually sets, not a fixed number.
-  */
- _bearerDepthFt(size) {
- const ACTUAL_IN = { '2x6': 5.5, '2x8': 7.25, '2x10': 9.25, '2x12': 11.25 };
- return (ACTUAL_IN[String(size || '2x10')] || 9.25) / 12;
- }
 
  /**
-  * Eave "eyebrow" metal on an OPEN lean face: a short band of wall panel that
-  * wraps the outer rafter bearer under the roof edge. On an open carport bay
-  * this is the only wall metal on that face — the bay stays open below it.
-  * Height = the bearer's actual depth (2x10 -> 9 1/4").
+  * Eave "eyebrow" metal on an OPEN lean face: a short band of wall panel down
+  * the outer edge, under the roof. On an open carport bay this is the only wall
+  * metal on that face — the bay stays open below it.
+  *
+  * Height comes from leanEyebrowHeightFt, the same rule the takeoff orders it
+  * by: the rafter bearer's face PLUS the rafter heel sitting on top of it, so a
+  * 2x10 bearer under 2x8 rafters gives 17". This used to draw the bearer's
+  * depth alone — 9 1/4" — which is why the model did not line up with a photo
+  * of the real thing.
   */
  _addLeanEyebrow(group, a, c, topY, heightFt, wallHex, outNx, outNz, ud) {
  const ax = (Number(a.x) || 0) * FT;
@@ -6831,6 +7209,28 @@ export class SceneView {
  return mesh;
  }
 
+ /**
+   * Seat a lean END-wall point in the same plane as the main wall it dies into.
+   *
+   * The end wall of a lean runs square off the building and butts the main
+   * building's gable wall. Both are sheeted on the same face of the same line
+   * of posts, so on a real building they are one continuous plane with a seam
+   * and corner trim over it. In the model the main wall is inset
+   * MAIN_WALL_PLANE_INSET_FT while the lean end wall sat on the nominal line,
+   * leaving the lean about 5/8" proud — a step that read as a vertical line the
+   * full height of the junction.
+   *
+   * Seating is done at the CALL SITE rather than inside the draw helpers so the
+   * end metal, its ribs, the wainscot and the wainscot trim all move together.
+   * outNx/outNz is the face's outward normal, so subtracting pushes inboard.
+   */
+ _seatOnMainWallPlane(p, outNx, outNz) {
+ return {
+ x: (Number(p.x) || 0) - (Number(outNx) || 0) * MAIN_WALL_PLANE_INSET_FT,
+ z: (Number(p.z) || 0) - (Number(outNz) || 0) * MAIN_WALL_PLANE_INSET_FT,
+ };
+ }
+
  _addLeanEndWallRake(
  group,
  inner,
@@ -6845,6 +7245,10 @@ export class SceneView {
  outNz = 0,
  allowThinOuter = false,
  ) {
+ // Points arrive already seated on the host wall's plane where that matters
+ // (see _seatOnMainWallPlane at the end-wall call sites) — the ribs, wainscot
+ // and trim that dress this face are seated with them, so nothing is nudged
+ // here on its own.
  const ix = (Number(inner.x) || 0) * FT;
  const iz = (Number(inner.z) || 0) * FT;
  const ox = (Number(outer.x) || 0) * FT;
@@ -7368,9 +7772,13 @@ export class SceneView {
  group.add(mesh);
  };
 
- for (const p of posts) {
+ for (const p0 of posts) {
+ const pl = resolvePostWorldPos(b, p0);
+ if (isPartSuppressed(b, pl.partId)) continue;
+ const p = pl.moved ? { ...p0, x: pl.x, z: pl.z } : p0;
  if (hideAttach && isAttachPost(p.x, p.z, p.face)) continue;
- place(p.x, p.z, Math.max(p.heightAboveGrade || 0, defaultH));
+ // A per-post height edit (2D Edit) sets the drawn height exactly; Auto keeps the lean's own.
+ place(p.x, p.z, p0.heightEdited ? p0.heightAboveGrade : Math.max(p.heightAboveGrade || 0, defaultH));
  }
  // Corner guarantee — outer corners only (never attach/inner)
  for (const c of corners) {
@@ -7426,6 +7834,102 @@ export class SceneView {
  beam.castShadow = true;
  group.add(beam);
  }
+ }
+
+
+ /**
+   * V braces: two 6×6 diagonals per post (both sides along the wall), 45°,
+   * long side 2′8″ (32″). Apex low on the post; legs rise up & out to the
+   * eave beam / girt line (a V, not an inverted V). Takeoff is unchanged.
+   * Frame / Skin+Frame / metal-off only — Skin-only hides with framing.
+   * @param {THREE.Object3D} group
+   * @param {Array<{x:number,z:number,wall?:string,heightAboveGrade?:number}>} posts
+   * @param {{ eaveFt?: number, mat?: THREE.Material }} [opts]
+   */
+ _addPostVBraces(group, posts, opts = {}) {
+  if (!posts?.length) return;
+  // Skin only (metal on, framing off): hide with framing
+  if (this.showMetal && !this.showFraming) return;
+  const mat =
+   opts.mat ||
+   new THREE.MeshStandardMaterial({
+    color: 0xa87848,
+    roughness: 0.72,
+    metalness: 0.02,
+    emissive: 0x1a0c04,
+    emissiveIntensity: 0.06,
+   });
+  const LONG = 32 / 12; // 2′8″ long side
+  const run = LONG / Math.SQRT2; // ~1.886′ horizontal & vertical @ 45°
+  const postHalf = 0.28;
+  const thick = 0.48; // ~6x6 visual
+  const eaveDefault = Number(opts.eaveFt) || 12;
+
+  // How far the run of posts reaches on each wall.
+  //
+  // A V brace kicks from the post up to the beam it carries, so it only exists
+  // where there IS beam on that side. On an END post the outboard brace has
+  // nothing to land on, and it was being drawn anyway — a 2'8" timber pointing
+  // out into open air past the last post, at every corner and at both ends of
+  // every open lean. Levi: "if it's an end post the ones sticking out wouldn't
+  // be there, it would just be the V brace on the inside."
+  //
+  // Measured per wall, since one call can carry posts from several walls and
+  // each has its own two ends.
+  const spanByWall = new Map();
+  for (const p of posts) {
+   if (!p) continue;
+   const wall = p.wall || p.primaryWall || 'left';
+   const along =
+    wall === 'left' || wall === 'right' ? Number(p.z) || 0 : Number(p.x) || 0;
+   const cur = spanByWall.get(wall);
+   if (!cur) spanByWall.set(wall, { min: along, max: along, n: 1 });
+   else {
+    cur.min = Math.min(cur.min, along);
+    cur.max = Math.max(cur.max, along);
+    cur.n += 1;
+   }
+  }
+
+  for (const p of posts) {
+   if (!p) continue;
+   const px = Number(p.x) || 0;
+   const pz = Number(p.z) || 0;
+   const wall = p.wall || p.primaryWall || 'left';
+   // Along-wall unit (left/right → ±Z; front/back → ±X)
+   let ax = 0;
+   let az = 0;
+   if (wall === 'left' || wall === 'right') az = 1;
+   else ax = 1;
+   const hPost = Math.max(2, Number(p.heightAboveGrade) || eaveDefault);
+   const yTop = Math.min(hPost - 0.12, eaveDefault - 0.2);
+   const yBot = Math.max(0.4, yTop - run);
+   // Slightly outboard of post face so braces read clear of the column
+   const out =
+    wall === 'left' ? -1 : wall === 'right' ? 1 : wall === 'front' ? -1 : 1;
+   let ox = 0;
+   let oz = 0;
+   if (wall === 'left' || wall === 'right') ox = out * 0.08;
+   else oz = out * 0.08;
+
+   const along = wall === 'left' || wall === 'right' ? pz : px;
+   const span = spanByWall.get(wall);
+   for (const side of [-1, 1]) {
+    // Skip the leg that would reach past the last post on this wall. A lone
+    // post keeps both, since with nothing to compare against there is no
+    // "inside" to pick.
+    if (span && span.n > 1) {
+     const reach = along + side * (postHalf + run);
+     if (reach < span.min - 0.05 || reach > span.max + 0.05) continue;
+    }
+    const x0 = px + ox + ax * side * postHalf;
+    const z0 = pz + oz + az * side * postHalf;
+    const x1 = px + ox + ax * side * (postHalf + run);
+    const z1 = pz + oz + az * side * (postHalf + run);
+    // V: low end on the post, high end out along the wall under the beam
+    this._woodBeam(group, x0, yBot, z0, x1, yTop, z1, mat, thick, thick);
+   }
+  }
  }
 
  /**
@@ -7528,18 +8032,27 @@ export class SceneView {
   emissiveIntensity: 0.08,
  });
  // Visual board: cantilever takeoff is 2x8 (1.5″ × 7.25″); else 2x6-ish.
- const sizeLabel = String(opts.sizeLabel || '2x6').toLowerCase();
+ const sizeLabel = String(opts.sizeOverride || opts.sizeLabel || '2x6').toLowerCase();
  const thick = 1.5 / 12;
- const face = sizeLabel === '2x8' ? 7.25 / 12 : 5.5 / 12;
+ const face = this._lumberFaceFt(sizeLabel) || (sizeLabel === '2x8' ? 7.25 / 12 : 5.5 / 12);
  const nest = Math.max(0.08, Number(opts.nestFt) || 0.14) + face / 2;
  const sp = Math.max(2, Number(opts.spacingFt) || 10);
  const len = Math.max(0, Number(lengthFt) || 0);
  if (len < 0.5) return;
 
- // Stations along lean length (same grid language as lean posts)
- const stations = [0];
- for (let u = sp; u < len - 0.05; u += sp) stations.push(Math.round(u * 1000) / 1000);
- if (stations[stations.length - 1] < len - 0.05) stations.push(Math.round(len * 1000) / 1000);
+ // Stations along lean length: the framing package's own rafter stations
+ // (what the takeoff bills) when given, else the legacy march.
+ let stations;
+ if (Array.isArray(opts.stations) && opts.stations.length) {
+  stations = opts.stations.map(Number).filter((u) => u >= -1e-6 && u <= len + 1e-6);
+ } else {
+  stations = [0];
+  for (let u = sp; u < len - 0.05; u += sp) stations.push(Math.round(u * 1000) / 1000);
+  if (stations[stations.length - 1] < len - 0.05) stations.push(Math.round(len * 1000) / 1000);
+ }
+ const tag = (m, kind = 'rafter') => {
+  if (m) m.userData = { frameMember: kind, leanToId: opts.leanToId || null };
+ };
 
  const ax = Number(i1.x) || 0;
  const az = Number(i1.z) || 0;
@@ -7572,8 +8085,8 @@ export class SceneView {
    const rx = (ix + ox) / 2;
    const rz = (iz + oz) / 2;
    // Attach half → ridge, outer half → ridge
-   this._woodBeam(group, ix, yIn, iz, rx, peakY, rz, mat, thick, face);
-   this._woodBeam(group, ox, eaveY, oz, rx, peakY, rz, mat, thick, face);
+   tag(this._woodBeam(group, ix, yIn, iz, rx, peakY, rz, mat, thick, face));
+   tag(this._woodBeam(group, ox, eaveY, oz, rx, peakY, rz, mat, thick, face));
   }
   return;
  }
@@ -7585,12 +8098,68 @@ export class SceneView {
   const iz = az + (bz - az) * t;
   const ox = cx + (dx - cx) * t;
   const oz = cz + (dz - cz) * t;
-  this._woodBeam(group, ix, yIn, iz, ox, yOut, oz, mat, thick, face);
+  tag(this._woodBeam(group, ix, yIn, iz, ox, yOut, oz, mat, thick, face));
  }
  }
 
+ /**
+   * Wrap lean roof framing (Frame view): common + jack rafters on both legs,
+   * purlin rows mitred at the hip. Draws js/domain/wrapLean.js
+   * wrapRoofFramingPlan exactly (the plan the takeoff bills). Hip beam is
+   * drawn by the caller.
+   */
+ _addWrapRoofFraming(group, plan, opts = {}) {
+  if (!plan || !Array.isArray(plan.rafters)) return;
+  const depth = Math.max(0.1, Number(opts.depth) || 1);
+  const yA = Number(opts.attachY) || 10;
+  const yO = Number(opts.outerY) || 8;
+  const yAt = (u) => yA - ((yA - yO) * Math.max(0, Math.min(depth, u))) / depth;
+  const rafterMat = new THREE.MeshStandardMaterial({
+   color: 0xc49a6c,
+   roughness: 0.68,
+   metalness: 0.02,
+   emissive: 0x2a1808,
+   emissiveIntensity: 0.08,
+  });
+  const purlinMat = new THREE.MeshStandardMaterial({ color: 0xc4a882, roughness: 0.72, metalness: 0.02 });
+  const thick = 1.5 / 12;
+  const face = 7.25 / 12; // 2x8 rafters (takeoff)
+  // Purlins sit on the rafters; both stay clear of the corrugation valleys so
+  // nothing reads through the pans in Skin + Frame.
+  const pThick = 3 / 12;
+  const pFace = 5.5 / 12;
+  // Extra clearance in Skin + Frame: the wrap pans are single-sided planes
+  // and low-precision depth buffers let boards 0.14' under them flicker through.
+  const pTopGap = Math.max(0.12, Number(opts.nestFt) || 0.14) + (this._skinPlusFrame() ? 0.16 : 0);
+  const pUnder = pTopGap + pFace / 2;
+  const rNest = pTopGap + pFace + face / 2;
+  for (const r of plan.rafters) {
+   const m = this._woodBeam(
+    group,
+    r.a.x * FT, (yAt(r.a.u) - rNest) * FT, r.a.z * FT,
+    r.b.x * FT, (yAt(r.b.u) - rNest) * FT, r.b.z * FT,
+    rafterMat, thick, face,
+   );
+   if (m) m.userData = { frameMember: r.kind === 'jack' ? 'jackRafter' : 'rafter', leanToId: opts.leanToId || null, leg: r.leg };
+  }
+  // Purlins ride just under the pans (same board as single-lean purlins).
+  for (const p of plan.purlins || []) {
+   const y = (yAt(p.u) - pUnder) * FT;
+   const dx = (p.b.x - p.a.x) * FT;
+   const dz = (p.b.z - p.a.z) * FT;
+   const len = Math.hypot(dx, dz);
+   if (len < 0.2) continue;
+   const mesh = new THREE.Mesh(new THREE.BoxGeometry(pThick, pFace, len), purlinMat);
+   mesh.position.set(((p.a.x + p.b.x) / 2) * FT, y, ((p.a.z + p.b.z) / 2) * FT);
+   mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(dx, 0, dz).normalize());
+   mesh.castShadow = false;
+   mesh.userData = { frameMember: 'purlin', leanToId: opts.leanToId || null, leg: p.leg };
+   group.add(mesh);
+  }
+ }
+
  /** Purlin visuals under lean roof (frame view only) — wood tone, not neon blue. */
- _addLeanPurlins(group, i1, i2, o1, o2, attachH, outerH, depthFt, lengthFt) {
+ _addLeanPurlins(group, i1, i2, o1, o2, attachH, outerH, depthFt, lengthFt, opts = {}) {
  const mat = new THREE.MeshStandardMaterial({
  color: 0xc4a882,
  roughness: 0.72,
@@ -7602,9 +8171,15 @@ export class SceneView {
  const underRoof = boardFace / 2 + 0.06; // keep taller board under pans
  // Seat to end-post OUTER faces (package ends are post centerlines).
  const postHalf = 0.55 / 2;
- const rows = Math.max(3, Math.min(8, Math.ceil(depthFt / 2) + 1));
- for (let r = 1; r < rows; r++) {
- const t = r / rows;
+ // Row count: the framing package's purlinRows (what the takeoff bills),
+ // evenly across the depth with a half space at ledger and eave. Legacy
+ // callers (no count) keep the old spread.
+ const modelRows = Math.round(Number(opts.rows) || 0);
+ const rows = modelRows > 0 ? modelRows : Math.max(3, Math.min(8, Math.ceil(depthFt / 2) + 1));
+ const rowTs = modelRows > 0
+  ? Array.from({ length: rows }, (_, r) => (r + 0.5) / rows)
+  : Array.from({ length: rows - 1 }, (_, r) => (r + 1) / rows);
+ for (const t of rowTs) {
  let ax = i1.x + (o1.x - i1.x) * t;
  let az = i1.z + (o1.z - i1.z) * t;
  let bx = i2.x + (o2.x - i2.x) * t;
@@ -7629,6 +8204,7 @@ export class SceneView {
  purlin.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.normalize());
  }
  purlin.castShadow = false;
+ purlin.userData = { frameMember: 'purlin', leanToId: opts.leanToId || null };
  group.add(purlin);
  }
  }
@@ -7704,12 +8280,9 @@ export class SceneView {
   const linePts = pts.map(
    (p) => new THREE.Vector3(p.x * FT, p.y * FT + 0.07, p.z * FT),
   );
-  group.add(
-   new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints(linePts),
-    new THREE.LineBasicMaterial({ color: trimHex, linewidth: 2 }),
-   ),
-  );
+  for (let li = 1; li < linePts.length; li++) {
+   this._trimStrip(group, linePts[li - 1], linePts[li], trimHex);
+  }
 
   // Under-eave apron boot on the wing face: fills the pocket between lean
   // pans and the wing eave drip so the eave fascia cannot float above the lean.
@@ -7767,7 +8340,15 @@ export class SceneView {
  const inLap = (Number(opts.inLapIn) || 4.0) / 12;
  const apronUp = (Number(opts.apronUpIn) || 5.0) / 12;
  const apronDrop = (Number(opts.apronDropIn) || 2.5) / 12;
- const T = 0.13;
+ // Levi: the junction trim must sit FLUSH with the metal, not stand proud as a
+ // raised L. It used to be a 0.13 ft thick apron standing 0.14 ft off the wall plus
+ // a horizontal "return" that ran out over the sloping lean pans — the return's
+ // top is level while the roof falls away from the wall, so it poked up above the
+ // metal and read as the raised L. Now: a thin apron seated on the wall skin (outer
+ // face only ~0.03 ft proud, just enough to win the depth test against the wall),
+ // and the under-pan return/plug are buried inside the wall bulk (they only ever
+ // existed as a daylight seal; nothing of them is visible).
+ const T = 0.04;
 
  const wall = opts.wall || (_isSideWall ? 'left' : 'front');
  let ox = 0;
@@ -7786,48 +8367,42 @@ export class SceneView {
  const yaw = Math.atan2(dx, dz);
  const midX = ((ax + bx) / 2) * FT;
  const midZ = ((az + bz) / 2) * FT;
- const out = 0.14;
- const faceCenter = out - T * 0.5;
+ // Wall skin outer face sits ~0.03 ft outside the building line; seat the apron's
+ // outer face 0.03 ft beyond that and bury its back 0.01 ft into the skin.
+ const outerFace = 0.06;
+ const faceCenter = outerFace - T * 0.5;
 
  // Apron face: mostly above the lean pans on the outer wall plane.
- const faceH = Math.max(0.28, apronUp + apronDrop);
- const midY = yRoof + (apronUp - apronDrop) * 0.5;
+ // Levi: when the lean roof meets the main wall AT the main eave line (the common
+ // full-height attach) the main roof metal starts right above it, so an apron that
+ // climbs 5 in above the lean pans stands up through the main roof's metal overhang
+ // as a black fin "sticking into the air". Never let the apron top rise past the
+ // main eave line - the main eave band already finishes that edge.
+ const mainEaveCap = Number(opts.mainEaveY);
+ let apronTop = yRoof + apronUp;
+ if (Number.isFinite(mainEaveCap) && mainEaveCap > 0) apronTop = Math.min(apronTop, mainEaveCap);
+ const apronBot = yRoof - apronDrop;
+ const faceH = Math.max(0.1, apronTop - apronBot);
+ const midY = (apronTop + apronBot) * 0.5;
  const face = new THREE.Mesh(new THREE.BoxGeometry(T, faceH, len + TRIM_LAP), mat);
  face.position.set(midX + ox * faceCenter, midY, midZ + oz * faceCenter);
  face.rotation.y = yaw;
- face.castShadow = true;
+ face.castShadow = false;
  face.renderOrder = 2;
  face.userData = { kind: 'leanTransitionApron', wall };
  group.add(face);
 
- // Short under-roof return — tucked under pans (daylight seal).
- const retThk = Math.max(T * 0.75, 0.1);
- const ret = new THREE.Mesh(
- new THREE.BoxGeometry(lap, retThk, len + TRIM_LAP),
- mat,
- );
- ret.position.set(
- midX + ox * (out + lap * 0.45),
- yRoof - retThk * 0.55,
- midZ + oz * (out + lap * 0.45),
- );
- ret.rotation.y = yaw;
- ret.castShadow = false;
- ret.renderOrder = 2;
- ret.userData = { kind: 'leanTransitionReturn', wall };
- group.add(ret);
-
- // Into-wall under-roof plug — fills the pocket where pans lap past the
- // building line so daylight cannot sneak between wall metal and roof.
+ // Under-roof plug — buried in the wall bulk (behind the skin), never visible.
+ const retThk = Math.max(T, 0.06);
  const plugDepth = Math.max(inLap + 0.06, 0.28);
  const plug = new THREE.Mesh(
  new THREE.BoxGeometry(plugDepth, retThk, len + TRIM_LAP),
  mat,
  );
  plug.position.set(
- midX - ox * (plugDepth * 0.5 - 0.04),
- yRoof - retThk * 0.55,
- midZ - oz * (plugDepth * 0.5 - 0.04),
+ midX - ox * (plugDepth * 0.5 + 0.02),
+ yRoof - retThk * 0.55 - 0.04,
+ midZ - oz * (plugDepth * 0.5 + 0.02),
  );
  plug.rotation.y = yaw;
  plug.castShadow = false;
@@ -8204,7 +8779,7 @@ export class SceneView {
 
  // Trusses — never at exact gable plane; inset along length.
  // Style from building.trussType: common | scissor | attic | parallelChord
- const count = Math.max(2, framing.trusses?.count || 2);
+ const count = Math.max(framing.trusses?.edited ? 1 : 2, framing.trusses?.count || 2);
 
  // Roof line at x, and how far a top chord's CENTRE must drop so its upper
  // FACE stays under the metal.
@@ -8233,9 +8808,13 @@ export class SceneView {
  (b.roofStyle || 'gable') === 'gable'
  ? trussMemberLayout(b, { xL, xR, eaveY, ridgeY, underRoof })
  : null;
+ const trussStations = framing.trusses?.edited ? framing.trusses.stations : null;
  for (let i = 0; i < count; i++) {
  const t = count === 1 ? 0.5 : i / (count - 1);
- const z = z0 + t * (z1 - z0);
+ // Explicit truss positions (2D Edit > Framing) are ft along the length.
+ const z = trussStations
+  ? Math.max(z0, Math.min(z1, Number(trussStations[i]) || 0)) // never ON the gable plane (bleeds through the metal)
+  : z0 + t * (z1 - z0);
  if (layout) {
  for (const seg of layout.top) {
  this._woodBeam(
@@ -8305,8 +8884,13 @@ export class SceneView {
  const trussThickZ = 0.13; // matches top-chord thickness in _woodBeam above
  const purlinLen = runL + trussThickZ;
  for (let side = 0; side < sides; side++) {
- for (let r = 1; r < rows; r++) {
- const t = r / Math.max(1, rows - 1); // 0 eave → 1 ridge; start at r=1
+ for (let r = framing.purlins?.edited ? 0 : 1; r < rows; r++) {
+ // Explicit purlin rows (2D Edit > Framing): ft in from the eave, plan.
+ const halfPlan = (b.roofStyle || 'gable') === 'mono' ? W : W / 2;
+ const editedT = framing.purlins?.edited && framing.purlins.rowsFt
+  ? Math.max(0, Math.min(1, (Number(framing.purlins.rowsFt[r]) || 0) / Math.max(0.5, halfPlan)))
+  : null;
+ const t = editedT != null ? editedT : r / Math.max(1, rows - 1); // 0 eave → 1 ridge; start at r=1
  let x;
  let y;
  if ((b.roofStyle || 'gable') === 'mono') {
@@ -8320,7 +8904,7 @@ export class SceneView {
  }
  // Visual board (~3″ × 5½″) — #69 readability; takeoff unchanged.
  const boardThick = 3 / 12;
- const boardFace = 5.5 / 12;
+ const boardFace = (b.framingEdits?.lumber?.purlin && this._lumberFaceFt(framing.purlins?.size)) || 5.5 / 12;
  const purlin = new THREE.Mesh(
  new THREE.BoxGeometry(boardThick, boardFace, purlinLen),
  purlinMat,
@@ -8513,14 +9097,12 @@ export class SceneView {
  const mesh = new THREE.Mesh(new THREE.BoxGeometry(postSize, h, postSize), mat);
  let px = placed.x;
  let pz = placed.z;
- // Skin + Frame: seat posts behind wall metal so they don't poke through
- const postInset = this._frameBehindSkinInsetFt(postSize / 2);
- if (postInset > 0) {
- const wall = placed.wall;
- if (wall === 'front') pz += postInset;
- else if (wall === 'back') pz -= postInset;
- else if (wall === 'left') px += postInset;
- else if (wall === 'right') px -= postInset;
+ // Skin + Frame: seat posts behind wall metal so they don't poke through.
+ // A corner post stands on two walls, so it is seated off both.
+ {
+ const seat = this._seatBehindSkinXZ(px, pz, b, postSize / 2);
+ px = seat.x;
+ pz = seat.z;
  }
  mesh.position.set(px * FT, h / 2, pz * FT);
  if (this._skinPlusFrame()) mesh.renderOrder = 1;
@@ -8546,6 +9128,34 @@ export class SceneView {
  if (partId === this.selectedPartId) this._highlightPartMesh(mesh, true);
  group.add(mesh);
  this.partPickables.push(mesh);
+ }
+
+ // V braces on main posts (structure flag; skip openWallPostsOnly / Skin-only)
+ const anyPostVb = Object.values(b.partOverrides || {}).some((o) => o && o.vBrace === 'on');
+ const anyKnee = Object.values(b.partOverrides || {}).some((o) => o && o.knee === true);
+ if ((b.vBraces || anyPostVb || anyKnee) && !openOnly && !isStudFrame(b)) {
+  const vbPosts = [];
+  const kneePosts = [];
+  for (const p of framing.mainPosts || []) {
+   const placed = resolvePostWorldPos(b, p);
+   if (isPartSuppressed(b, placed.partId)) continue;
+   const seat = this._seatBehindSkinXZ(placed.x, placed.z, b, postSize / 2);
+   const px = seat.x;
+   const pz = seat.z;
+   const entry = {
+    x: px,
+    z: pz,
+    wall: placed.wall,
+    heightAboveGrade: p.heightAboveGrade || H,
+   };
+   if (postHasVBrace(b, placed.partId, b.vBraces)) vbPosts.push(entry);
+   if (postHasKneeBrace(b, placed.partId)) kneePosts.push(entry);
+  }
+  this._addPostVBraces(group, vbPosts, { eaveFt: H });
+  this._addPostKneeBraces(group, kneePosts, {
+   eaveFt: H,
+   faceFt: this._lumberFaceFt(lumberEdit(b, 'brace').size || '2x6'),
+  });
  }
 
 
@@ -8653,29 +9263,58 @@ export class SceneView {
  if (isWallOpen(b, o.wall)) continue;
  if (openingsByWall[o.wall]) openingsByWall[o.wall].push(o);
  }
- /** Pad first/last run to corner post outer faces (visual seat only). */
- const seatRuns = (wallLen, runs) => {
- if (!runs.length) return [{ u0: -postHalf, u1: wallLen + postHalf }];
- const out = runs.map((r) => ({ u0: r.u0, u1: r.u1 }));
- out[0].u0 = Math.min(out[0].u0, -postHalf);
- out[out.length - 1].u1 = Math.max(out[out.length - 1].u1, wallLen + postHalf);
- return out;
- };
- // Shared wall-normal inset for all four walls (Skin + Frame clears metal).
- const girtInset = this._skinPlusFrame()
+ // Shared wall-normal inset, declared before seatRuns so the ends can use it.
+ const girtInsetFt = this._skinPlusFrame()
  ? this._frameBehindSkinInsetFt(girtW / 2)
  : girtW * 0.55;
- for (const y of framing.girts.levels || []) {
+ // Per-wall girt heights (2D Edit > Framing). Auto = the uniform ladder on every wall.
+ const girtLvBy = framing.girts.levelsByWall || {};
+ const girtHas = (wall, y) => {
+  if (!framing.girts.edited) return true;
+  const lv = girtLvBy[wall];
+  return !Array.isArray(lv) || lv.some((v) => Math.abs(v - y) < 0.006);
+ };
+ /**
+  * Seat the first/last run at the corner.
+  *
+  * With Frame alone the girt is padded half a post PAST the corner, which
+  * reads as it lapping onto the corner post. With the SKIN on that padding
+  * is 3.3" of board sticking straight out through the neighbouring wall's
+  * metal — a row of green stubs down every corner. So when both are shown it
+  * stops at the inside face of that metal instead.
+  */
+ const seatRuns = (wallLen, runs) => {
+ const skin = this._skinPlusFrame();
+ const lo = skin ? girtInsetFt : -postHalf;
+ const hi = skin ? wallLen - girtInsetFt : wallLen + postHalf;
+ if (!runs.length) return [{ u0: lo, u1: hi }];
+ const out = runs.map((r) => ({ u0: r.u0, u1: r.u1 }));
+ out[0].u0 = skin ? Math.max(out[0].u0, lo) : Math.min(out[0].u0, lo);
+ const last = out.length - 1;
+ out[last].u1 = skin ? Math.min(out[last].u1, hi) : Math.max(out[last].u1, hi);
+ return out;
+ };
+ const girtInset = girtInsetFt;
+ const girtYs = new Set(framing.girts.levels || []);
+ if (framing.girts.edited) {
+  for (const w of ['front', 'back', 'left', 'right']) {
+   if (Array.isArray(girtLvBy[w])) for (const v of girtLvBy[w]) girtYs.add(v);
+  }
+ }
+ const girtFace = framing.girts.edited || b.framingEdits?.lumber?.girt
+  ? this._lumberFaceFt(framing.girts.size)
+  : null;
+ for (const y of [...girtYs].sort((a, c) => a - c)) {
  if (girtSet.has('front') || girtSet.has('back')) {
  for (const z of [0, L]) {
  const wall = z === 0 ? 'front' : 'back';
- if (!girtSet.has(wall)) continue;
+ if (!girtSet.has(wall) || !girtHas(wall, y)) continue;
  // Nudge inward so the board face isn't buried in exterior metal.
  const zIn = z === 0 ? girtInset : L - girtInset;
  for (const run of seatRuns(W, this._girtRunsAlongWall(W, y, openingsByWall[wall]))) {
  const len = run.u1 - run.u0;
  if (len < 0.08) continue;
- const girt = new THREE.Mesh(new THREE.BoxGeometry(len, girtH, girtW), girtMat);
+ const girt = new THREE.Mesh(new THREE.BoxGeometry(len, girtFace || girtH, girtW), girtMat);
  girt.position.set((run.u0 + run.u1) / 2, y, zIn);
  if (this._skinPlusFrame()) girt.renderOrder = 1;
  girt.castShadow = true;
@@ -8686,12 +9325,12 @@ export class SceneView {
  if (girtSet.has('left') || girtSet.has('right')) {
  for (const x of [0, W]) {
  const wall = x === 0 ? 'left' : 'right';
- if (!girtSet.has(wall)) continue;
+ if (!girtSet.has(wall) || !girtHas(wall, y)) continue;
  const xIn = x === 0 ? girtInset : W - girtInset;
  for (const run of seatRuns(L, this._girtRunsAlongWall(L, y, openingsByWall[wall]))) {
  const len = run.u1 - run.u0;
  if (len < 0.08) continue;
- const girt = new THREE.Mesh(new THREE.BoxGeometry(girtW, girtH, len), girtMat);
+ const girt = new THREE.Mesh(new THREE.BoxGeometry(girtW, girtFace || girtH, len), girtMat);
  girt.position.set(xIn, y, (run.u0 + run.u1) / 2);
  if (this._skinPlusFrame()) girt.renderOrder = 1;
  girt.castShadow = true;
@@ -8727,6 +9366,71 @@ export class SceneView {
  }
  }
 
+  /**
+   * Knee braces (2D Edit > Framing): two 45° 4' boards per post, from the post
+   * up and out along the wall under the beam. Frame / Skin+Frame only.
+   */
+ _addPostKneeBraces(group, posts, opts = {}) {
+  if (!posts?.length) return;
+  if (this.showMetal && !this.showFraming) return;
+  const mat = new THREE.MeshStandardMaterial({ color: 0xb98d5a, roughness: 0.72, metalness: 0.02 });
+  const run = 4 / Math.SQRT2;
+  const postHalf = 0.28;
+  const face = opts.faceFt || 5.5 / 12;
+  const eaveDefault = Number(opts.eaveFt) || 12;
+  for (const p of posts) {
+   const px = Number(p.x) || 0;
+   const pz = Number(p.z) || 0;
+   const wall = p.wall || 'left';
+   const alongZ = wall === 'left' || wall === 'right';
+   const hPost = Math.max(2, Number(p.heightAboveGrade) || eaveDefault);
+   const yTop = Math.min(hPost - 0.3, eaveDefault - 0.3);
+   const yBot = Math.max(0.4, yTop - run);
+   for (const side of [-1, 1]) {
+    const x0 = px + (alongZ ? 0 : side * postHalf);
+    const z0 = pz + (alongZ ? side * postHalf : 0);
+    const x1 = px + (alongZ ? 0 : side * (postHalf + run));
+    const z1 = pz + (alongZ ? side * (postHalf + run) : 0);
+    this._woodBeam(group, x0, yBot, z0, x1, yTop, z1, mat, 0.125, face);
+   }
+  }
+ }
+
+
+ /**
+   * Thin trim strip between two world points (ft*FT already applied), flat on
+   * the roof. Replaces THREE.Line, which z-fights the pans and has no width.
+   */
+ _trimStrip(group, p0, p1, hex, widthFt = 0.12, thkFt = 0.05) {
+  const a = p0.clone();
+  const c = p1.clone();
+  const along = new THREE.Vector3().subVectors(c, a);
+  const len = along.length();
+  if (len < 0.05) return null;
+  along.normalize();
+  const right = new THREE.Vector3(0, 1, 0).cross(along);
+  if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+  right.normalize();
+  const up = new THREE.Vector3().crossVectors(along, right).normalize();
+  if (up.y < 0) {
+   up.negate();
+   right.negate();
+  }
+  const mat = this._metalMat(hex, { metalness: 0.55, roughness: 0.4, clearcoat: 0.25 });
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(widthFt, thkFt, len), mat);
+  mesh.position.copy(a).add(c).multiplyScalar(0.5).addScaledVector(up, thkFt / 2);
+  mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, along));
+  mesh.castShadow = false;
+  group.add(mesh);
+  return mesh;
+ }
+
+ /** Visual board face (ft) for a nominal lumber size; null = keep the default look. */
+ _lumberFaceFt(size) {
+  const f = { '2x4': 3.5, '2x6': 5.5, '2x8': 7.25, '2x10': 9.25, '2x12': 11.25 }[size];
+  return f ? f / 12 : null;
+ }
+
  /** Place a wood beam between two points (world ft). */
  _woodBeam(group, x1, y1, z1, x2, y2, z2, mat, thickness = 0.15, depth = 0.2) {
  const a = new THREE.Vector3(x1, y1, z1);
@@ -8747,6 +9451,7 @@ export class SceneView {
  beam.castShadow = false;
  beam.receiveShadow = true;
  group.add(beam);
+ return beam;
  }
 
  /**

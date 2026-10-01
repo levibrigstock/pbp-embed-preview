@@ -17,26 +17,34 @@ import {
  leanToOverhangFt,
  leanToRoofAreaSqFt,
  isWallOpen,
+ isDriveThroughWall,
+ loafingWallOf,
  openWallList,
  closedWallList,
  isLeanFaceOpen,
  leanOpenFaceList,
  roundFtToNearestInch,
  isStudFrame,
-} from './types.js?v=20260923houseWrap1';
+ partOverride,
+ postPartId,
+ lumberSize,
+ lumberTreated,
+ lumberEdit,
+} from './types.js?v=20261001sakoff2';
 import {
  isWrapLean,
  wrapFootprint,
  wrapOuterPostStations,
  wrapRoofPlanes,
  wrapHipSegment,
-} from './wrapLean.js?v=20260923frameView1';
+ wrapRoofFramingPlan,
+} from './wrapLean.js?v=20260925frameAtt1';
 import {
  leanWingJunctions,
  clippedWrapFootprint,
  filterPostsOutsideWings,
  leanWingTakeoffAdjust,
-} from './leanWingJunction.js?v=20260923frameView1';
+} from './leanWingJunction.js?v=20260925frameAtt1';
 import {
  useFullGirtPackage,
  girtPackMode,
@@ -47,7 +55,7 @@ import {
  hasWoodOverhangStandardEave,
  hasAnyLean,
  hasPartialEnclosedShedLean,
-} from './productionPolicy.js?v=20260923trim5';
+} from './productionPolicy.js?v=20261001leancorner16b';
 import { ellBuriedRunOnWall } from './ell.js?v=20260923frameView1';
 import { measureRoofPlane, frameEaveHeightFt } from './measure.js?v=20260923openOff1';
 
@@ -528,7 +536,7 @@ export function generateMainPosts(b) {
  ];
 
  for (const { wall, len } of wallSpecs) {
- const wallOpen = isWallOpen(b, wall);
+ const wallOpen = isDriveThroughWall(b, wall);
  // Lean on this wall still needs intermediate posts for attachment
  const leanOnWall = (b.leanTos || []).some((lt) => lt.wall === wall);
  // Open drive-through wall: corners only (unless lean needs structure)
@@ -986,7 +994,10 @@ export function computeWrapLeanMaterials(b, lean, fpIn, junctionsIn) {
 
  // Purlins: rows across depth per leg; run along each outer+attach length
  const pad = 0; // open
- const purlinRowsPerLeg = Math.max(2, Math.ceil((depth + metalOh) / purlinSp) + pad);
+ const purlinRowsPerLeg =
+  lean.framingEdits?.purlinRows > 0
+   ? Math.max(1, Math.round(lean.framingEdits.purlinRows / 2))
+   : Math.max(2, Math.ceil((depth + metalOh) / purlinSp) + pad);
  const purlinRows = purlinRowsPerLeg * 2;
  // Run lengths: leg A along (lenA+depth), leg B along (lenB+depth) — bill separately as sum
  const purlinRunFt = lengthA + depth; // representative; Lf uses both
@@ -1015,6 +1026,21 @@ export function computeWrapLeanMaterials(b, lean, fpIn, junctionsIn) {
  // Hip rafter / beam billed once
  const hip = wrapHipSegment(b, lean, { attachH, eaveH: outerH });
  const hipRafterLf = hip.slopeLf;
+
+ // Roof framing: common rafters on both legs at lean rafter spacing (ends
+ // inclusive, same stations as a shed lean), jack rafters hip → outer bearer
+ // in the corner square, one hip rafter, purlin rows mitred at the hip. A wrap
+ // is two shed legs, so it bills rafters like every other shed lean (it used
+ // to bill none and draw none). scene.js draws exactly this plan.
+ const rafterSpacingFt = [2, 4, 5].includes(Number(lean.rafterSpacing))
+  ? Number(lean.rafterSpacing)
+  : 5;
+ const wrapFraming = wrapRoofFramingPlan(fp, {
+  spacingFt: rafterSpacingFt,
+  stationsA: lengthA > 0.01 ? gridStations(lengthA, rafterSpacingFt) : [0],
+  stationsB: lengthB > 0.01 ? gridStations(lengthB, rafterSpacingFt) : [0],
+  purlinRowsPerLeg,
+ });
 
  // Roof panels: two legs, coverage along each outer run
  const coverage = 3;
@@ -1091,10 +1117,16 @@ export function computeWrapLeanMaterials(b, lean, fpIn, junctionsIn) {
  outerBearerLf,
  outerBearerSize,
  subFasciaLf: 0,
- cantileverRafterQty: 0,
- cantileverRafterLenFt: 0,
- cantileverRafterSize: '2x8',
- cantileverRafterSpacingFt: 5,
+ // Wrap rafters (common + jack) bill on the shared "Lean-to rafter" line.
+ cantileverRafterQty: wrapFraming.counts.rafters,
+ cantileverRafterLenFt: rafter,
+ cantileverRafterSize: lean.framingEdits?.rafterSize || lumberEdit(b, 'rafter').size || '2x8',
+ cantileverRafterSpacingFt: rafterSpacingFt,
+ wrapCommonRafterQty: wrapFraming.counts.common,
+ wrapJackRafterQty: wrapFraming.counts.jack,
+ hipRafterQty: 1,
+ hipRafterSize: '2x10',
+ wrapFraming,
  girtRows: 0,
  girtLf,
  skirtLf: 0,
@@ -1571,6 +1603,9 @@ export function computeLeanToMaterials(b, lean, dims) {
    purlinExtra12 = Math.max(3, Math.ceil(length / 4) + 1);
   }
  }
+ // 2D Edit > Framing: explicit lean purlin row count
+ const leanEd = lean.framingEdits || {};
+ if (leanEd.purlinRows > 0) purlinRows = leanEd.purlinRows;
  const purlinLf = purlinRows * purlinRunFt;
 
  // --- Attachment ledger at main wall (always) — double-banded 2x10 (2-ply) ---
@@ -1617,12 +1652,18 @@ export function computeLeanToMaterials(b, lean, dims) {
  const hangerSize = ['2x8', '2x10'].includes(lean.joistHangerSize)
   ? lean.joistHangerSize
   : '2x8';
- const cantileverRafterSize = hangersOn ? hangerSize : '2x8';
+ const cantileverRafterSize =
+  leanEd.rafterSize || lumberEdit(b, 'rafter').size || (hangersOn ? hangerSize : '2x8');
  let cantileverRafterQty = 0;
  let cantileverRafterLenFt = 0;
+ /** Along-lean rafter stations (ft from the lean's start) — scene.js draws these. */
+ let leanRafterStationsFt = [];
  if (isShed && length > 0.01 && depth > 0.01) {
   // Ends inclusive: a rafter at each end of the lean, the rest on centre.
-  cantileverRafterQty = gridStations(length, cantileverRafterSpacingFt).length;
+  leanRafterStationsFt = leanEd.rafterStationsFt && leanEd.rafterStationsFt.length
+   ? leanEd.rafterStationsFt.map((u) => Math.max(0, Math.min(length, u)))
+   : gridStations(length, cantileverRafterSpacingFt);
+  cantileverRafterQty = leanRafterStationsFt.length;
   // Slope length incl. lean overhang policy (same as roof/rake helpers).
   cantileverRafterLenFt = rafter;
  }
@@ -1652,14 +1693,20 @@ export function computeLeanToMaterials(b, lean, dims) {
  // --- Girts (enclosed faces only); first row at wainscot when on ---
  let girtLf = 0;
  let girtRows = 0;
- const girtLevelsOuter = enclosed
+ let girtLevelsOuter = enclosed
  ? girtLevelsForHeight(outerH, girtSp, wainH)
  : [];
+ if (enclosed && Number.isFinite(leanEd.girtRows)) {
+  const n = Math.max(0, leanEd.girtRows);
+  girtLevelsOuter = Array.from({ length: n }, (_, i) => Math.round(((i + 1) * outerH) / (n + 1) * 100) / 100);
+ }
  girtRows = girtLevelsOuter.length;
  if (enclosed) {
  if (!openOuter) girtLf += girtRows * length;
  const endH = (outerH + attachH) / 2;
- const endLevels = girtLevelsForHeight(endH, girtSp, wainH);
+ const endLevels = Number.isFinite(leanEd.girtRows)
+  ? girtLevelsOuter
+  : girtLevelsForHeight(endH, girtSp, wainH);
  if (!openLeft) girtLf += endLevels.length * depth;
  if (!openRight) girtLf += endLevels.length * depth;
  }
@@ -1816,6 +1863,7 @@ export function computeLeanToMaterials(b, lean, dims) {
  cantileverRafterLenFt,
  cantileverRafterSize,
  cantileverRafterSpacingFt,
+ leanRafterStationsFt,
  joistHangerAutoQty: hangersOn && isShed ? cantileverRafterQty : 0,
  joistHangerBillQty: (() => {
   if (!(hangersOn && isShed)) return 0;
@@ -1942,6 +1990,20 @@ export function generateGirts(b) {
 
  const levelsMain = girtLevelsForHeight(eave, spacingFt, wainH, levelOpts);
  const levels = levelsMain.filter((y) => y <= eave + 0.05);
+ // 2D Edit > Framing: explicit girt heights for one wall (add / remove / move).
+ // Absent = the uniform ladder above, so Auto jobs are untouched.
+ const editedLevels = (wallKey, leanEd = null, heightFt = 0) => {
+  const lv = b.framingEdits?.girts?.[wallKey]?.levels;
+  if (Array.isArray(lv)) return lv;
+  // Lean-to: a simple row count spreads evenly up the face
+  if (leanEd && Number.isFinite(leanEd.girtRows) && heightFt > 0) {
+   const n = Math.max(0, leanEd.girtRows);
+   return Array.from({ length: n }, (_, i) => Math.round(((i + 1) * heightFt) / (n + 1) * 100) / 100);
+  }
+  return null;
+ };
+ /** @type {Record<string, number[]>} girt heights per run key (wall or lean-face) */
+ const levelsByWall = {};
 
  const closed = closedWallList(b);
  /** @type {{ wall: string, lengthFt: number, rows: number, host: string }[]} */
@@ -1960,8 +2022,12 @@ export function generateGirts(b) {
   len = Math.max(0, len - Math.min(ellBuriedRunOnWall(b, wall), len));
   if (len > 0.1) {
   const isGableEnd = wall === 'front' || wall === 'back';
-  const rows = levels.length + (isGableEnd && gableEaveRow ? 1 : 0);
-  runs.push({ wall, lengthFt: len, rows, host: 'main' });
+  const ed = editedLevels(wall);
+  const rows = ed ? ed.length : levels.length + (isGableEnd && gableEaveRow ? 1 : 0);
+  levelsByWall[wall] = ed ? [...ed] : [...levels];
+  if (!(ed && rows === 0)) {
+   runs.push({ wall, lengthFt: len, rows, host: 'main', ...(ed ? { edited: true } : {}) });
+  }
   }
  }
 
@@ -1991,11 +2057,14 @@ export function generateGirts(b) {
  const lv = girtLevelsForHeight(outerH, spacingFt, wainH, levelOpts).filter(
  (y) => y <= outerH + 0.05,
  );
- runs.push({
+ const edL = editedLevels(`${lean.wall}-outer`, lean.framingEdits, outerH);
+ levelsByWall[`${lean.wall}-outer`] = edL ? [...edL] : [...lv];
+ if (!(edL && edL.length === 0)) runs.push({
  wall: `${lean.wall}-outer`,
  lengthFt: length,
- rows: lv.length,
+ rows: edL ? edL.length : lv.length,
  host: lean.id || 'lean',
+ ...(edL ? { edited: true } : {}),
  });
  }
  // Dual enclosed eave wings: lean end walls sit in the extended gable
@@ -2006,19 +2075,25 @@ export function generateGirts(b) {
  (y) => y <= endH + 0.05,
  );
  if (!isLeanFaceOpen(lean, 'leftEnd')) {
- runs.push({
+ const edE = editedLevels(`${lean.wall}-leftEnd`, lean.framingEdits, endH);
+ levelsByWall[`${lean.wall}-leftEnd`] = edE ? [...edE] : [...lv];
+ if (!(edE && edE.length === 0)) runs.push({
  wall: `${lean.wall}-leftEnd`,
  lengthFt: depth,
- rows: lv.length,
+ rows: edE ? edE.length : lv.length,
  host: lean.id || 'lean',
+ ...(edE ? { edited: true } : {}),
  });
  }
  if (!isLeanFaceOpen(lean, 'rightEnd')) {
- runs.push({
+ const edE = editedLevels(`${lean.wall}-rightEnd`, lean.framingEdits, endH);
+ levelsByWall[`${lean.wall}-rightEnd`] = edE ? [...edE] : [...lv];
+ if (!(edE && edE.length === 0)) runs.push({
  wall: `${lean.wall}-rightEnd`,
  lengthFt: depth,
- rows: lv.length,
+ rows: edE ? edE.length : lv.length,
  host: lean.id || 'lean',
+ ...(edE ? { edited: true } : {}),
  });
  }
  }
@@ -2027,17 +2102,21 @@ export function generateGirts(b) {
  const linearFt = runs.reduce((s, r) => s + r.lengthFt * r.rows, 0);
  const openSidewalls = isWallOpen(b, 'left') && isWallOpen(b, 'right');
 
+ const girtEdited = runs.some((r) => r.edited);
  return {
  levels,
+ levelsByWall,
+ edited: girtEdited,
  levelCount: levels.length,
  linearFt,
  runs,
  /** From productionPolicy: continuous | per-wall */
  packMode: girtPackMode(b),
  productionPackage: production,
- size: b.girtSize,
+ size: lumberSize(b, 'girt', b.girtSize),
  walls: closed,
  openWalls: openWallList(b),
+ loafingWall: loafingWallOf(b),
  openSidewalls,
  wainscotGirtAt: wainOn ? wainH : null,
  };
@@ -2061,16 +2140,29 @@ export function generatePurlins(b) {
  const rafter = rafterLength(b);
  const halfRun = (Number(b.width) || 0) / 2 + metalOh + frameOh;
  const stationPad = purlinStationPad(b);
- const rowsPerSide = purlinRowsPerSide(b);
+ const autoRows = purlinRowsPerSide(b);
+ // 2D Edit > Framing: explicit purlin rows (ft in from the eave, plan). Row
+ // count follows the list; Auto = the production count and even spacing.
+ const edRows = b.framingEdits?.purlinRunsFt;
+ const edited = Array.isArray(edRows) && edRows.length > 0;
+ const rowsPerSide = edited ? edRows.length : autoRows;
+ const halfPlan = (Number(b.width) || 0) / ((b.roofStyle === 'mono') ? 1 : 2);
+ const rowsFt = edited
+  ? [...edRows]
+  : Array.from({ length: autoRows }, (_, r) =>
+     Math.round((autoRows > 1 ? (r / (autoRows - 1)) * halfPlan : 0) * 100) / 100);
  const sides = b.roofStyle === 'mono' ? 1 : 2;
  const runLength = Number(b.length) || 0;
  const linearFt = rowsPerSide * sides * runLength;
 
  return {
  rowsPerSide,
+ rowsFt,
+ edited,
+ autoRowsPerSide: autoRows,
  sides,
  linearFt,
- size: b.purlinSize,
+ size: lumberSize(b, 'purlin', b.purlinSize),
  rafterLength: rafter,
  stationPad,
  halfRunFt: halfRun,
@@ -2083,11 +2175,28 @@ export function generatePurlins(b) {
 export function generateTrusses(b) {
  // item list: 60' @ 5' o.c. → 13 trusses (ends inclusive)
  const sp = b.trussSpacing || 5;
+ const ed = b.framingEdits?.trussStationsFt;
+ if (Array.isArray(ed) && ed.length) {
+  const L = Number(b.length) || 0;
+  const st = ed.map((z) => Math.max(0, Math.min(L, z)));
+  return {
+   count: st.length,
+   spacing: sp,
+   actualSpacing: st.length > 1 ? L / (st.length - 1) : L,
+   stations: st,
+   edited: true,
+   size: lumberSize(b, 'rafter', b.rafterSize || '2x8'),
+  };
+ }
  const n = Math.floor(b.length / sp) + 1;
+ const actual = b.length / Math.max(1, n - 1);
  return {
  count: n,
  spacing: sp,
- actualSpacing: b.length / Math.max(1, n - 1),
+ actualSpacing: actual,
+ stations: Array.from({ length: n }, (_, i) => Math.round(i * actual * 100) / 100),
+ edited: false,
+ size: lumberSize(b, 'rafter', b.rafterSize || '2x8'),
  };
 }
 
@@ -2146,7 +2255,7 @@ export function generateSkirt(b) {
  * Linear feet of lumber = 2 eaves × length × 2 plies.
  */
 export function generateTrussCarriers(b) {
- const size = b.trussCarrierSize || '2x10';
+ const size = lumberSize(b, 'carrier', b.trussCarrierSize || '2x10');
  const plies = 2;
  // Roof still needs carriers on eave lines even if wall is open (drive-through under roof)
  const eaveWalls = 2; // left + right
@@ -2161,6 +2270,46 @@ export function generateTrussCarriers(b) {
  description: `2-ply ${size} truss carrier @ eaves (L&R)`,
  };
 }
+
+/**
+ * 2D Edit > Framing header override: size and/or plies on a door header.
+ * Automatic (no override) leaves the production rule untouched.
+ */
+function applyHeaderOverride(o, fr, stockOf, roleSize = null) {
+ if (!fr) return fr;
+ // Building-wide header lumber (2D Edit > Framing) applies to every header
+ // that exists on the Auto list; a per-opening size wins over it.
+ if (roleSize && fr.header && !o?.headerSize) {
+  fr = {
+   ...fr,
+   header: { ...fr.header, size: roleSize, override: true },
+   ...(fr.headerSecondary ? { headerSecondary: { ...fr.headerSecondary, size: roleSize } } : {}),
+  };
+ }
+ const size = o?.headerSize || '';
+ const plies = Number(o?.headerPlies) || 0;
+ if (!size && !plies) return fr;
+ // A window has no header on the Auto list (one backing board frames it).
+ // Choosing a size / plies adds a real header over the opening.
+ if (!fr.header && fr.type === 'window' && stockOf) {
+  const cut = (Number(o.width) || 0) + 0.5;
+  return {
+   ...fr,
+   header: { size: size || '2x6', plies: plies || 2, lengthFt: stockOf(cut), cutFt: cut, override: true },
+  };
+ }
+ if (!fr.header) return fr;
+ return {
+  ...fr,
+  header: {
+   ...fr.header,
+   size: size || fr.header.size,
+   plies: plies || fr.header.plies || 1,
+   override: true,
+  },
+ };
+}
+
 
 /**
  * Opening lumber — production order package (calibrated to PBP shop order lists).
@@ -2228,7 +2377,7 @@ export function openingFraming(openings, b = {}, mainPosts = []) {
  return Math.ceil(x);
  };
 
- return (openings || []).map((o) => {
+ const autoFraming = (o) => {
  const w = Number(o.width) || 0;
  const h = Number(o.height) || 0;
  const type = o.type || 'walk';
@@ -2294,7 +2443,10 @@ export function openingFraming(openings, b = {}, mainPosts = []) {
  needsJambPosts: true,
  headerWidth: w,
  };
- });
+ };
+
+ const roleSize = lumberEdit(b, 'header').size;
+ return (openings || []).map((o) => applyHeaderOverride(o, autoFraming(o), stock12, roleSize));
 }
 
 /**
@@ -2307,7 +2459,7 @@ export function openingFraming(openings, b = {}, mainPosts = []) {
  * Corner studs are shared (deduped by world x/z).
  */
 export function generateStudWalls(b) {
- const size = ['2x4', '2x6', '2x8'].includes(b.studSize) ? b.studSize : '2x6';
+ const size = lumberSize(b, 'stud', ['2x4', '2x6', '2x8'].includes(b.studSize) ? b.studSize : '2x6');
  const spacingIn = [16, 24].includes(Number(b.studSpacingIn))
  ? Number(b.studSpacingIn)
  : 16;
@@ -2374,6 +2526,7 @@ export function generateStudWalls(b) {
  size,
  spacingIn,
  treatedBottomPlate: true,
+ plateSize: lumberSize(b, 'plate', size),
  note: 'Stud-frame: treated bottom plate matches stud size; anchors @ 2′ o.c.',
  };
 }
@@ -2411,7 +2564,11 @@ export function generateFraming(b) {
  // Coarse 0.1' rounding artifact (14−8×4/12 → 11.3 instead of 11'4")
  const coarse10 = Math.round((mainE - depth * (dropPitch / 12)) * 10) / 10;
  let cur = Number(lt.eaveHeight);
- if (!cur || Math.abs(cur - stale3) < 0.15 || Math.abs(cur - coarse10) < 0.05) {
+ // Cantilever eaves are user-placed on the main wall (the lean slides up and
+ // down it): only the genuine stale-3 legacy case is re-derived, never a
+ // value that merely lands near main − depth×3/12.
+ const nearStale3 = isLeanCantilever(lt) ? looksStale3 : Math.abs(cur - stale3) < 0.15;
+ if (!cur || nearStale3 || Math.abs(cur - coarse10) < 0.05) {
  lt.eaveHeight = geo;
  } else {
  lt.eaveHeight = roundFtToNearestInch(cur);
@@ -2429,10 +2586,28 @@ export function generateFraming(b) {
  const leanPosts = leanPackages
  .flatMap((p) => p.posts)
  .filter((p) => !mainKeys.has(keyXZ(p.x, p.z)));
+ // 2D Edit > Framing: per-post height (ft above grade). Re-picks the stock
+ // length from the normal rule so the post list, cut list and 3D all follow.
+ for (const pp of [...mainPosts, ...leanPosts]) {
+  const ov = partOverride(b, postPartId(pp.x, pp.z, pp.leanToId ? `lean:${pp.leanToId}` : 'main'));
+  const hOv = Number(ov?.heightFt);
+  if (!(hOv > 0)) continue;
+  const embed = pp.embedFt != null ? Number(pp.embedFt) : (b.postDepthFt ?? 3);
+  const pick = pickPostStockLength(hOv, embed, POST_STOCK_LENGTHS, { building: b });
+  pp.autoHeightAboveGrade = pp.heightAboveGrade;
+  pp.heightAboveGrade = hOv;
+  pp.orderHeightAboveGrade = hOv;
+  pp.requiredFt = pick.requiredFt;
+  pp.stockFt = pick.stockFt;
+  pp.totalLengthFt = pick.stockFt;
+  pp.gradeBufferApplied = pick.gradeBufferApplied;
+  pp.fieldCutFt = pick.fieldCutFt || null;
+  pp.heightEdited = true;
+ }
  const girts = generateGirts(b);
  // Stud-frame: keep wall girts, but lumber matches stud size (2x4/2x6/2x8).
  if (studFrame && girts) {
- girts.size = ['2x4', '2x6', '2x8'].includes(b.studSize) ? b.studSize : '2x6';
+ girts.size = lumberSize(b, 'girt', ['2x4', '2x6', '2x8'].includes(b.studSize) ? b.studSize : '2x6');
  girts.note = 'Stud-frame girts match stud size';
  }
  const purlins = generatePurlins(b);
@@ -2482,6 +2657,7 @@ export function generateFraming(b) {
  } else {
  skirt = generateSkirt(b);
  }
+ skirt.size = lumberSize(b, 'skirt', skirt.size || b.skirtSize || '2x6');
  const studWalls = studFrame ? generateStudWalls(b) : null;
  const trussCarriers = generateTrussCarriers(b);
  const openings = openingFraming(b.openings || [], b, mainPosts);
@@ -2665,7 +2841,8 @@ export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDept
  }
  const eave = Number(b?.eaveHeight) || 0;
  const h = Number(heightAboveGradeFt) || 0;
- const embed = Number(postDepthFt ?? b?.postDepthFt) || 3;
+ const embedRaw = Number(postDepthFt ?? b?.postDepthFt);
+ const embed = Number.isFinite(embedRaw) ? embedRaw : 3;
  const eaveStock = pickPostStockLengthCore(eave, embed).stockFt;
  const fullStock = pickPostStockLengthCore(h, embed).stockFt;
  const riseAboveEave = h - eave;
@@ -2694,7 +2871,8 @@ export function jambOrderHeightFt(b, heightAboveGradeFt, isOpeningJamb, postDept
  */
 export function eaveClampedJambStockFt(eaveHeightFt, postDepthFt) {
  const eave = Number(eaveHeightFt) || 0;
- const embed = Number(postDepthFt) || 3;
+ const embedRaw = Number(postDepthFt);
+ const embed = Number.isFinite(embedRaw) ? embedRaw : 3;
  return pickPostStockLengthCore(eave, embed).stockFt;
 }
 
@@ -2828,7 +3006,8 @@ export function pickPostStockLength(heightAboveGradeFt, postDepthFt, stock = POS
  // Eave-clamped jambs: match eave wall-post stock (includes tall-eave 20→22).
  // Walk step-down (−2) is applied later in generateMainPosts for mid eaves only.
  if (isJamb && eaveClamped && opts.building) {
- const embed = Number(postDepthFt ?? opts.building.postDepthFt) || 3;
+ const embedRaw = Number(postDepthFt ?? opts.building.postDepthFt);
+ const embed = Number.isFinite(embedRaw) ? embedRaw : 3;
  const eaveH = Number(opts.building.eaveHeight) || 0;
  const heel = Math.max(0, Number(opts.heelHeightFt) || 0);
  // Match develop eaveClampedJambStockFt (no tall-eave flag). Heel alone
